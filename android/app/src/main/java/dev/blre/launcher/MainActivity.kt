@@ -74,6 +74,13 @@ private enum class Section(val label: String, val emptyTitle: String, val emptyB
             "现在还没有接入游戏，所以调用 Level、Player 这类函数会如实报告" +
             "“没有连接游戏”，而不是假装成功。",
     ),
+    MODS(
+        "Mods",
+        "还没有导入 mod",
+        "导入一个原生 mod（含 nmod.json 的目录）或旧版 .mod 补丁。\n" +
+            "旧版补丁能读出作者和它有多少字节，但这一版还不能应用它——" +
+            "列表里会直接写明原因，而不是等进游戏才失败。",
+    ),
 }
 
 class MainActivity : ComponentActivity() {
@@ -94,12 +101,17 @@ private fun LauncherApp() {
     // Each store lives in app-private storage: the files the user imported are
     // theirs, and nothing outside this app needs to read them.
     val root = remember { File(context.filesDir, "library").absolutePath }
+    // Mods are copied in rather than scanned in place: a `.mod` is a single file
+    // the user can hand over through the picker, and the core only ever sees
+    // paths, so the app owns one directory and the picker fills it.
+    val modsRoot = remember { File(context.filesDir, "mods").absolutePath }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
     var tab by remember { mutableStateOf(Section.BUILDS) }
     var builds by remember { mutableStateOf<List<GameBuild>>(emptyList()) }
     var packs by remember { mutableStateOf<List<TexturePack>>(emptyList()) }
+    var mods by remember { mutableStateOf<List<ModEntry>>(emptyList()) }
     var api by remember { mutableStateOf<ScriptApi?>(null) }
     var scriptName by remember { mutableStateOf<String?>(null) }
     var report by remember { mutableStateOf<ScriptReport?>(null) }
@@ -118,6 +130,7 @@ private fun LauncherApp() {
                 coreVersion = Core.version()
                 builds = Core.list(root)
                 packs = Core.packs(root)
+                mods = Core.scanMods(modsRoot)
                 api = Core.scriptApi()
                 fatal = null
             } catch (t: Throwable) {
@@ -179,6 +192,18 @@ private fun LauncherApp() {
                         scriptName = file.name
                         report = Core.checkScript(source)
                     }
+
+                    Section.MODS -> {
+                        val dir = File(modsRoot)
+                        dir.mkdirs()
+                        // Overwrite by name: re-picking the same patch is how a
+                        // user retries after a corrupt download, and refusing
+                        // would make that impossible.
+                        val dest = File(dir, file.name)
+                        file.copyTo(dest, overwrite = true)
+                        mods = Core.scanMods(modsRoot)
+                        snackbar.showSnackbar("已导入 ${dest.name}")
+                    }
                 }
             } catch (t: Throwable) {
                 snackbar.showSnackbar(t.message ?: "导入失败")
@@ -211,6 +236,7 @@ private fun LauncherApp() {
                             busy -> "正在处理…"
                             tab == Section.BUILDS -> "导入 APK"
                             tab == Section.PACKS -> "导入材质包"
+                            tab == Section.MODS -> "导入 mod"
                             else -> "检查脚本"
                         }
                     )
@@ -265,6 +291,8 @@ private fun LauncherApp() {
                         )
 
                         Section.SCRIPTS -> ScriptsPane(tab, api, scriptName, report)
+
+                        Section.MODS -> ModsList(mods, tab)
                     }
                 }
             }
@@ -396,6 +424,63 @@ private fun PacksList(
         }
         items(packs, key = { it.id }) { pack ->
             PackCard(pack = pack, onDelete = { onDelete(pack) }, onToggle = { onToggle(pack, it) })
+        }
+    }
+}
+
+// --------------------------------------------------------------------- mods
+
+@Composable
+private fun ModsList(mods: List<ModEntry>, tab: Section) {
+    if (mods.isEmpty()) {
+        Message(tab.emptyTitle, tab.emptyBody, action = null, onAction = null)
+        return
+    }
+    LazyColumn(
+        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            ListHeader("共 ${mods.size} 个 mod · ${mods.count { it.usable }} 个可用")
+        }
+        items(mods, key = { it.fileName }) { mod -> ModCard(mod) }
+    }
+}
+
+@Composable
+private fun ModCard(mod: ModEntry) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(mod.displayName, style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = listOfNotNull(
+                    mod.kindLabel,
+                    mod.author.takeIf { it.isNotBlank() }?.let { "by $it" },
+                    mod.detail.takeIf { it.isNotBlank() },
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // The reason is the point of this row. A legacy patch that is merely
+            // *listed* must not look like one that will run, or the user looks
+            // for the bug here instead of reading why it cannot.
+            if (!mod.usable && mod.reason.isNotBlank()) {
+                Text(
+                    text = mod.reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            Text(
+                text = mod.fileName,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
         }
     }
 }

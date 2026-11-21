@@ -68,6 +68,30 @@ data class TexturePack(
 data class PackImportResult(val pack: TexturePack, val deduped: Boolean)
 
 /**
+ * One mod the core found on disk, mirroring `core::mods::Entry`.
+ *
+ * `usable` is the field that matters: a legacy `.mod` can be *read* but not
+ * *applied*, and the row has to say so. A list that showed it like any other
+ * mod would send the user looking for a bug in the launcher instead of reading
+ * the reason.
+ */
+data class ModEntry(
+    val fileName: String,
+    val kind: String,
+    val title: String,
+    val author: String,
+    val usable: Boolean,
+    val reason: String,
+    val detail: String,
+) {
+    val displayName: String
+        get() = title.takeIf { it.isNotBlank() } ?: fileName
+
+    val kindLabel: String
+        get() = if (kind == "native") "原生 mod" else "旧版补丁"
+}
+
+/**
  * What running a script produced.
  *
  * `halted` is separate from `failed` on purpose: a script stopped by the
@@ -263,5 +287,23 @@ object Core {
             halted = data.optBoolean("halted", false),
             messages = messages,
         )
+    }
+
+    // ------------------------------------------------------------------ mods
+
+    private fun parseMod(o: JSONObject): ModEntry = ModEntry(
+        fileName = o.optString("file_name"),
+        kind = o.optString("kind", "legacy"),
+        title = o.optString("title"),
+        author = o.optString("author"),
+        usable = o.optBoolean("usable", false),
+        reason = o.optString("reason"),
+        detail = o.optString("detail"),
+    )
+
+    suspend fun scanMods(dir: String): List<ModEntry> = withContext(Dispatchers.IO) {
+        val data = call(JSONObject().put("cmd", "mods.scan").put("dir", dir).toString())
+        val arr = data.optJSONArray("mods") ?: return@withContext emptyList()
+        (0 until arr.length()).map { parseMod(arr.getJSONObject(it)) }
     }
 }

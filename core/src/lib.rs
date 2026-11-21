@@ -20,6 +20,8 @@ pub mod catalog;
 pub mod error;
 pub mod jni_glue;
 pub mod launch;
+pub mod legacy;
+pub mod mods;
 pub mod nmod;
 pub mod pack;
 pub mod script;
@@ -29,6 +31,8 @@ pub mod version;
 pub use catalog::{Catalog, ImportOutcome, Library, VersionEntry};
 pub use error::{Error, Result};
 pub use launch::{LaunchPlan, ModSlot, RejectedMod, Rejection};
+pub use legacy::LegacyMod;
+pub use mods::{Entry as ModEntry, Kind as ModKind};
 pub use nmod::{Nmod, NmodManifest};
 pub use version::{GameRange, GameVersion};
 

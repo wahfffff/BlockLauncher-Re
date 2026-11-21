@@ -191,6 +191,16 @@ fn handle(request: &str) -> std::result::Result<Value, Failure> {
             Ok(json!({ "globals": globals, "hooks": crate::script::HOOKS }))
         }
 
+        // Listing is not loading. A legacy `.mod` is reported as readable but
+        // not runnable, which is the only honest answer for a format whose
+        // payload encoding is not known (see docs/LEGACY-MOD.md).
+        "mods.scan" => {
+            let dir = string_arg(&req, "dir")?;
+            let entries = crate::mods::scan(std::path::Path::new(&dir))
+                .map_err(Failure::from_core)?;
+            Ok(json!({ "count": entries.len(), "mods": entries }))
+        }
+
         other => Err(Failure::new(
             "UNKNOWN_COMMAND",
             format!("unknown command: {other}"),

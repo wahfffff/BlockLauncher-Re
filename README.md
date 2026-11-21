@@ -54,12 +54,13 @@ rather than the roadmap restated as if it were done.
 | Texture packs (import, real texture count, enable/disable) | **done** | `cargo test` |
 | ModPE script runtime (globals, hooks, bounded execution) | **done off-device** | `cargo test`; the game side is not attached yet |
 | Native mod (`.nmod`) manifest validation | **done** | `cargo test` |
+| Legacy `.mod` patches (PTP container: author line, payload size) | **read only** | `cargo test` against 8 real files; the payload is not applied — see `docs/LEGACY-MOD.md` |
 | Launch planning (ABI choice, mod filtering, ordering) | **done** | `cargo test` |
 | JNI bridge | **done** | `cargo test` for the bridge; the symbol name is checked by the APK build |
 | Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 81 cases on a host machine. The format readers are tested
+`cargo test` runs 105 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 
