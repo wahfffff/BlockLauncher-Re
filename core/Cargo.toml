@@ -1,0 +1,23 @@
+[package]
+name = "blocklauncher-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Version library, APK inspection and native-mod handling for BlockLauncher-Re"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "blre_core"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+# Everything here is pure Rust. The Android side links this crate through
+# `staticlib`, so a C dependency would mean cross-compiling it with the NDK for
+# four ABIs; these four crates need no toolchain beyond rustc.
+miniz_oxide = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[features]
+default = []

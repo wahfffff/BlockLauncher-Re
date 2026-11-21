@@ -1,0 +1,18 @@
+# Everything that gets compiled, executed or shipped is LF. A CRLF in a shell
+# script fails on the device in a way that reads like a missing file, and a CRLF
+# in a Kotlin source fails in a way that reads like a syntax error on line 1.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.rs   text eol=lf
+*.kt   text eol=lf
+*.kts  text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.xml  text eol=lf
+
+*.png  binary
+*.jar  binary
+*.so   binary

@@ -1,0 +1,17 @@
+# Rust
+/core/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Android / Gradle
+/app/build/
+/build/
+.gradle/
+local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Host scratch
+/scratch/

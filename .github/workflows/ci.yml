@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core:
+    name: core (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The core has no C dependencies, so this is all the toolchain it needs.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Test
+        working-directory: core
+        run: cargo test --all-targets
+
+      - name: Build release
+        working-directory: core
+        run: cargo build --release
+
+      # The example exists so the binary readers can be pointed at a real APK by
+      # hand; here it only has to run and reject a non-APK cleanly.
+      - name: Example rejects a non-APK
+        working-directory: core
+        run: |
+          set +e
+          cargo run --quiet --example inspect -- README.md
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "inspect accepted a Markdown file as an APK"
+            exit 1
+          fi
+          echo "ok - rejected with exit $code"
