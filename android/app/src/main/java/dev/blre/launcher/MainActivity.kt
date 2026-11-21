@@ -169,7 +169,7 @@ private fun LauncherApp() {
                             if (result.deduped) {
                                 "这个材质包已经在库里了"
                             } else {
-                                "已导入 ${result.pack.displayName}（${result.pack.textures} 张贴图）"
+                                "已导入 ${result.pack.displayName}（${result.pack.summary}）"
                             }
                         )
                     }
@@ -456,7 +456,7 @@ private fun PackCard(pack: TexturePack, onDelete: () -> Unit, onToggle: (Boolean
                 Text(
                     text = listOfNotNull(
                         pack.version.takeIf { it.isNotBlank() }?.let { "v$it" },
-                        "${pack.textures} 张贴图",
+                        "${pack.summary}",
                         humanSize(pack.size),
                     ).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,

@@ -35,7 +35,22 @@ mod imp {
             // same envelope as everything else so the UI has one error path.
             Err(e) => return answer(&mut env, &error_reply("JNI", &e.to_string())),
         };
-        answer(&mut env, &dispatch(&text))
+
+        // The second safety net. `run_detached` keeps script stack overflows and
+        // panics inside a thread it owns; this keeps *any other* panic — a bug in
+        // the catalog, an index that trips an assertion — from crossing the FFI
+        // boundary and aborting the process. `extern "system"` would turn an
+        // escaping unwind into an abort, so catching here is the only place it can
+        // be turned into the reply the Kotlin side already knows how to show.
+        //
+        // Requires `panic = "unwind"`; with `abort` this is dead code and a panic
+        // kills the app, which is what it used to do.
+        let reply = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&text)))
+        {
+            Ok(reply) => reply,
+            Err(_) => error_reply("PANIC", "the core panicked; the launcher is still running"),
+        };
+        answer(&mut env, &reply)
     }
 
     fn error_reply(code: &str, msg: &str) -> String {

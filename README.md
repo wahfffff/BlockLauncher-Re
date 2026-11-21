@@ -42,7 +42,7 @@ rather than the roadmap restated as if it were done.
 | Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 70 cases on a host machine. The format readers are tested
+`cargo test` runs 80 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 
@@ -54,10 +54,13 @@ packs, and a script checker.
 - **Builds** — import a game APK you already have, see its package, version, ABIs
   and SHA-256, delete it. It does not start the game yet; an imported build is a
   file in a list, and the launch button arrives with M3.
-- **Texture packs** — import a `.zip`, see how many texture files it actually
-  contains, enable or disable it, delete it. An archive with a manifest but no
-  textures is rejected at import, which is the moment the user can still do
-  something about it.
+- **Texture packs** — import a `.zip`, see how many images (or shaders) it
+  actually carries, enable or disable it, delete it. Shape is not policed: a
+  wrapper directory, an `images/` root, `assets/` and a shader-only archive all
+  import, because all four are layouts real 0.14 packs ship. An APK is refused by
+  name, which is the one archive that would otherwise be installed silently and
+  do nothing. See [docs/PACKS.md](docs/PACKS.md) for the layouts and the
+  measurement behind them.
 - **Scripts** — pick a ModPE `.js` and have the real runtime load it. The report
   says whether it parsed, what its top-level code did, and every game call it
   made comes back as "no game is attached" rather than silently succeeding. A

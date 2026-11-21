@@ -114,3 +114,20 @@ cut off well before it matters.
 * **No persisted script store.** The UI checks a script the user picks; it does
   not keep a list of installed scripts the way builds and texture packs are kept.
   The runtime does not depend on that.
+
+## Where a script runs
+
+Scripts do not run on the calling thread. script_engine::run_detached starts a
+thread with 16 MiB of stack and runs the engine there, because a JNI thread is
+given 1 MiB and the engine's parser walks a left-leaning tree recursively: a long
+`a + a + a …` chain or a long `else if` chain needs more stack than that, and
+exhausting a stack cannot be caught — the process aborts, so the app disappears
+with no error to read.
+
+Measured on the real scripts that exposed it: four of the five in the sample
+payload overflow 1 MiB and all four complete at 2 MiB. 16 MiB is an eightfold
+margin over that threshold, and costs virtual address space rather than memory.
+
+Two shapes that are *not* the problem, also measured: bracket nesting (max 21
+across those scripts) and plain statement count (8000 flat `var` statements
+parse in 1 MiB).

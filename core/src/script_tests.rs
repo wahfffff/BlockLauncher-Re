@@ -224,6 +224,90 @@ fn a_normal_script_fits_inside_the_default_budget() {
     assert!(!report.halted, "{:?}", report.messages);
 }
 
+/// A generated script can present the parser with a left-leaning tree thousands
+/// of nodes deep, which is what a recursive walk needs a lot of stack for.
+///
+/// The shape matters and was measured: bracket nesting (max 21 across the real
+/// scripts) and statement count are both innocent — 8000 flat `var` statements
+/// parse in 1 MiB — while a long `a + a + a …` chain or a long `else if` chain
+/// overflows it. 2000 terms overflow 1 MiB and fit comfortably in
+/// [`STACK_BYTES`]; before the runtime had its own thread this aborted the app,
+/// which is what "importing a .js closes the launcher" was.
+#[test]
+fn a_long_operator_chain_parses_off_the_caller_thread() {
+    let source = format!("var x = 0{};\n", "+1".repeat(2000));
+
+    let report = run_detached(source, Limits::default()).expect("runs on its own stack");
+    assert_eq!(report.failed, 0, "{:?}", report.messages);
+    assert!(!report.halted, "{:?}", report.messages);
+}
+
+/// The same shape through the ordinary call path, which is what the bridge used
+/// to do. This is here to make the contrast explicit: `run` is the same-thread
+/// entry point and is fine for small inputs, so the test only asserts that the
+/// *detached* path is what the bridge uses — mixing them up is the bug.
+#[test]
+fn the_bridge_runs_scripts_through_the_detached_entry_point() {
+    let source = crate::bridge::dispatch(r#"{"cmd":"scripts.check","source":"var a = 1;"}"#);
+    let v: serde_json::Value = serde_json::from_str(&source).expect("a reply");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["ran"], 1);
+}
+
+/// A script reaching into the game's Java objects is the normal case for
+/// BlockLauncher mods, so the error has to say what is missing rather than
+/// "com is not defined".
+#[test]
+fn touching_the_java_bridge_explains_what_is_missing() {
+    let script = r#"var ctx = com.mojang.minecraftpe.MainActivity.currentMainActivity.get();"#;
+    let report = run(script, Box::new(Recording::default())).unwrap();
+
+    assert_eq!(report.failed, 1);
+    let message = report.messages.join(" ");
+    assert!(message.contains("Java bridge"), "{message}");
+    assert!(message.contains("com"), "{message}");
+}
+
+/// Rhino can subclass a Java class in place; ECMAScript cannot, and the engine's
+/// own complaint (`expected one of ',' or ')', got '{'`) names the punctuation
+/// instead of the feature.
+#[test]
+fn a_java_adapter_is_refused_by_name() {
+    let script = r#"
+        var d = new android.app.AlertDialog.Builder(ctx).setView(sv)
+            .setNegativeButton("ok", new android.content.DialogInterface.OnClickListener() {
+                onClick: function (mp) { }
+            });
+    "#;
+
+    match run(script, Box::new(Recording::default())) {
+        Err(Error::BadScript(msg)) => {
+            assert!(msg.contains("subclasses a Java class"), "{msg}");
+            assert!(msg.contains("Rhino"), "{msg}");
+        }
+        other => panic!("expected BadScript, got {:?}", other.map(|r| r.messages)),
+    }
+}
+
+/// The detector must not fire on ordinary JavaScript, including a call whose
+/// argument is an object literal — the shape it looks for ends in `){`.
+#[test]
+fn the_java_adapter_detector_ignores_ordinary_code() {
+    for source in [
+        "var x = new Foo();",
+        "var x = new Foo(1, 2);",
+        "var x = new java.util.ArrayList();",
+        "var x = {a: 1};",
+        "var x = f(function () { return 1; });",
+        "var x = new Foo().bar({a: 1});",
+    ] {
+        assert!(
+            !looks_like_java_adapter(source),
+            "false positive on: {source}"
+        );
+    }
+}
+
 #[test]
 fn the_engine_still_words_limits_the_way_we_detect_them() {
     // Detection is textual because the engine does not export the limit payload.

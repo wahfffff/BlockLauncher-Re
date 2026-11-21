@@ -22,7 +22,7 @@
 use crate::catalog::Library;
 use crate::error::Error;
 use crate::pack::PackStore;
-use crate::script::{Limits, NullHost};
+use crate::script::Limits;
 use crate::script_engine;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -170,9 +170,11 @@ fn handle(request: &str) -> std::result::Result<Value, Failure> {
         // silently succeeding.
         "scripts.check" => {
             let source = string_arg(&req, "source")?;
-            let report =
-                script_engine::run_with(&source, Box::new(NullHost::new()), Limits::default())
-                    .map_err(Failure::from_core)?;
+            // Never on this thread: a JNI thread has 1 MiB of stack, and parsing a
+            // real mod script needs more than that (see `run_detached`). Doing it
+            // here is what made importing a .js kill the app.
+            let report = script_engine::run_detached(source, Limits::default())
+                .map_err(Failure::from_core)?;
             Ok(json!({
                 "ran": report.ran,
                 "failed": report.failed,

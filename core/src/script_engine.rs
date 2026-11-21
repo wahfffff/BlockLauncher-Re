@@ -9,7 +9,7 @@
 //! table in `script.rs`, the docs and the code cannot drift apart.
 
 use crate::error::Error;
-use crate::script::{enter, with_host as host_call, Host, Limits, Report, API};
+use crate::script::{enter, with_host as host_call, Host, Limits, NullHost, Report, API};
 use boa_engine::{
     js_string, object::builtins::JsArray, object::ObjectInitializer, property::Attribute, Context,
     JsError, JsNativeError, JsValue, NativeFunction, Source,
@@ -222,6 +222,91 @@ fn call_hook(ctx: &mut Context, name: &str) -> std::result::Result<bool, JsError
     Ok(true)
 }
 
+/// Names BlockLauncher's Java bridge gives a script, installed as objects that
+/// explain themselves instead of being absent.
+///
+/// Real scripts start with `var ctx = com.mojang.minecraftpe.MainActivity
+/// .currentMainActivity.get();` — the script reaches into the game's Java
+/// objects. Left undefined, that is `ReferenceError: com is not defined`, which
+/// tells a user nothing. A `Proxy` whose `get` throws turns it into a sentence
+/// naming the missing feature, at the line the script actually used it.
+const PRELUDE: &str = r#"
+(function () {
+  function missing(name) {
+    return new Proxy({}, {
+      get: function (_, key) {
+        throw new Error(
+          "this launcher does not provide BlockLauncher's Java bridge, so " +
+          name + "." + String(key) + " cannot be reached");
+      }
+    });
+  }
+  globalThis.com = missing("com");
+  globalThis.java = missing("java");
+  globalThis.android = missing("android");
+})();
+"#;
+
+/// `new java.util.ArrayList() { … }` is Rhino's JavaAdapter — a script
+/// subclassing a Java class in place. It is not ECMAScript, so the engine reports
+/// `expected one of ',' or ')', got '{'`, which points at the symptom rather than
+/// the cause.
+///
+/// This cannot misfire on valid JavaScript: `new Foo() {` is a syntax error in
+/// every version of the language, so a match is a JavaAdapter or a broken file,
+/// and both deserve the same explanation.
+fn looks_like_java_adapter(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+
+    while let Some(found) = source[i..].find("new") {
+        let mut p = i + found + 3;
+
+        let skip_ws = |p: &mut usize| {
+            while *p < bytes.len() && (bytes[*p] as char).is_ascii_whitespace() {
+                *p += 1;
+            }
+        };
+
+        skip_ws(&mut p);
+
+        // A dotted Java class name; the dot is what tells it apart from a plain
+        // JavaScript constructor.
+        let start = p;
+        let mut has_dot = false;
+        while p < bytes.len() {
+            let c = bytes[p] as char;
+            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                p += 1;
+            } else if c == '.' {
+                has_dot = true;
+                p += 1;
+            } else {
+                break;
+            }
+        }
+
+        if has_dot && p > start {
+            skip_ws(&mut p);
+            if p < bytes.len() && bytes[p] == b'(' {
+                p += 1;
+                skip_ws(&mut p);
+                if p < bytes.len() && bytes[p] == b')' {
+                    p += 1;
+                    skip_ws(&mut p);
+                    if p < bytes.len() && bytes[p] == b'{' {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        i = i + found + 3;
+    }
+
+    false
+}
+
 /// Run one script against `host` under the default [`Limits`].
 pub fn run(source: &str, host: Box<dyn Host>) -> crate::Result<Report> {
     run_with(source, host, Limits::default())
@@ -264,10 +349,22 @@ fn apply(ctx: &mut Context, limits: Limits) {
 /// Run one script against `host` under `limits`, then call `newLevel` if the
 /// script defined it.
 pub fn run_with(source: &str, host: Box<dyn Host>, limits: Limits) -> crate::Result<Report> {
+    if looks_like_java_adapter(source) {
+        return Err(Error::BadScript(
+            "this script subclasses a Java class in place (`new java.…(){ … }`), which is a \
+             BlockLauncher/Rhino extension; this launcher does not implement the Java bridge yet"
+                .into(),
+        ));
+    }
+
     let _guard = enter(host);
     let mut ctx = Context::default();
     apply(&mut ctx, limits);
     install(&mut ctx).map_err(|e| Error::BadScript(format!("cannot build the script globals: {e}")))?;
+
+    // Best effort. If the engine cannot build the proxies the script still runs;
+    // it just goes back to reporting "com is not defined" instead of a sentence.
+    let _ = ctx.eval(Source::from_bytes(PRELUDE));
 
     let mut report = Report::default();
     match ctx.eval(Source::from_bytes(source)) {
@@ -303,6 +400,50 @@ pub fn run_with(source: &str, host: Box<dyn Host>, limits: Limits) -> crate::Res
     }
 
     Ok(report)
+}
+
+/// Stack reserved for the thread a script runs on.
+///
+/// Measured against the real mod scripts, not guessed. Four of the five in the
+/// sample payload — `80随机迷宫(2).js`, `Gun.js.js`, `创世神(GUI)v1.8.js` and
+/// `红石Mod-V6.js` — overflow a 1 MiB stack, which is exactly what an Android
+/// JNI thread is given, and the runtime aborts the process on the spot: no
+/// exception, no toast, the app is simply gone. All four run to completion at
+/// 2 MiB. 16 MiB is an eightfold margin over that measured threshold.
+///
+/// The cost is virtual address space, not memory: pages are committed only as
+/// the parse actually recurses, so a small script still touches a few pages.
+pub const STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Run one script on a thread this crate owns, with [`STACK_BYTES`] of stack.
+///
+/// Two failures are being kept away from the caller here, and they need
+/// different mechanisms:
+///
+/// * **Stack exhaustion** cannot be caught at all — it is a guard-page hit and
+///   the process dies. The only remedy is to give the parser more stack than it
+///   needs, on a thread whose stack size we choose rather than inherit from the
+///   JVM.
+/// * **A panic** can be caught, but only if the profile unwinds (it does; see
+///   `Cargo.toml`) and only on the thread that panicked — which is why the join
+///   below is where it becomes an `Err` rather than an abort.
+///
+/// When the game host lands, it must be constructed *inside* this thread: a JNI
+/// reference is not `Send`, and the honest way to have a host here is to attach
+/// to the JVM on this thread.
+pub fn run_detached(source: String, limits: Limits) -> crate::Result<Report> {
+    let handle = std::thread::Builder::new()
+        .name("blre-script".into())
+        .stack_size(STACK_BYTES)
+        .spawn(move || run_with(&source, Box::new(NullHost::new()), limits))
+        .map_err(|e| Error::BadScript(format!("cannot start the script thread: {e}")))?;
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(Error::BadScript(
+            "the script runtime panicked; the launcher is still running".into(),
+        )),
+    }
 }
 
 /// Advance one tick: call `modTick(ticks)` when a script defined it.

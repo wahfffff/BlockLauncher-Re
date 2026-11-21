@@ -1,6 +1,6 @@
 [package]
 name = "blocklauncher-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Version library, APK inspection and native-mod handling for BlockLauncher-Re"
@@ -38,17 +38,22 @@ default = []
 #   lto            the engine's generics are instantiated once after inlining
 #                  instead of in every codegen unit that touches them
 #   codegen-units  one unit is what gives LTO a whole crate to work with
-#   panic = abort  `extern "system"` already aborts on unwind, so the tables
-#                  that exist to support an unwind that can never happen are
-#                  dead weight; a Rust panic still takes the app down, which is
-#                  the failure mode the bridge's contract already assumed
 #   strip          drops the static symbol table (74k entries on arm64); the
 #                  dynamic one, which is what JNI lookup uses, is untouched
+#
+# `panic` is deliberately left at `unwind`. It was `abort` here, on the argument
+# that `extern "system"` aborts on unwind anyway so the tables were dead weight.
+# That argument is about an unwind crossing the FFI boundary, which must not
+# happen — but the tables are also what lets a panic be caught on this side of
+# it, and a core that takes the whole app down for one bad script is a bug
+# report with no message in it. `jni_glue` catches; `script_engine::run_detached`
+# catches in the thread it owns. The cost is the unwind tables, and it is worth
+# it: see the stack-overflow note on `run_detached` for the crash that started
+# this.
 #
 # `opt-level` stays at the default 3: this is a runtime others wait on, and
 # trading its speed for a smaller download is the wrong trade.
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = "symbols"

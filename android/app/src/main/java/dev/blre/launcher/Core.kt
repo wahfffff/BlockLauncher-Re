@@ -47,10 +47,22 @@ data class TexturePack(
     val description: String,
     val size: Long,
     val textures: Int,
+    val shaders: Int,
+    /** `"texture"` or `"shader"`; the core decides, the UI only displays it. */
+    val kind: String,
     val enabled: Boolean,
 ) {
     val displayName: String
         get() = name.takeIf { it.isNotBlank() } ?: "未命名材质包"
+
+    /**
+     * What this pack replaces, in one phrase.
+     *
+     * A shader pack carries no images at all, so a card that only ever said
+     * "0 张贴图" would describe a working pack as an empty one.
+     */
+    val summary: String
+        get() = if (kind == "shader") "$shaders 个着色器" else "$textures 张贴图"
 }
 
 data class PackImportResult(val pack: TexturePack, val deduped: Boolean)
@@ -176,6 +188,9 @@ object Core {
         description = o.optString("description"),
         size = o.optLong("size"),
         textures = o.optInt("textures"),
+        shaders = o.optInt("shaders"),
+        // Absent from an index the core wrote before shader packs existed.
+        kind = o.optString("kind", "texture"),
         enabled = o.optBoolean("enabled", false),
     )
 
