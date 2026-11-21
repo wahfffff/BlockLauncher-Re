@@ -30,3 +30,25 @@ jni = "0.21"
 
 [features]
 default = []
+
+# The APK carries one copy of this library per ABI and the JavaScript engine is
+# most of it, so release is tuned for size in the parts that cost nothing at
+# runtime:
+#
+#   lto            the engine's generics are instantiated once after inlining
+#                  instead of in every codegen unit that touches them
+#   codegen-units  one unit is what gives LTO a whole crate to work with
+#   panic = abort  `extern "system"` already aborts on unwind, so the tables
+#                  that exist to support an unwind that can never happen are
+#                  dead weight; a Rust panic still takes the app down, which is
+#                  the failure mode the bridge's contract already assumed
+#   strip          drops the static symbol table (74k entries on arm64); the
+#                  dynamic one, which is what JNI lookup uses, is untouched
+#
+# `opt-level` stays at the default 3: this is a runtime others wait on, and
+# trading its speed for a smaller download is the wrong trade.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
