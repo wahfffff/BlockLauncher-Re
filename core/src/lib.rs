@@ -21,6 +21,9 @@ pub mod error;
 pub mod jni_glue;
 pub mod launch;
 pub mod nmod;
+pub mod pack;
+pub mod script;
+pub mod script_engine;
 pub mod version;
 
 pub use catalog::{Catalog, ImportOutcome, Library, VersionEntry};

@@ -22,6 +22,10 @@ pub enum Error {
     AlreadyExists(String),
     /// A native mod package did not describe itself correctly.
     BadMod(String),
+    /// A texture pack is not something the game could use.
+    BadPack(String),
+    /// A ModPE script failed before it could define anything.
+    BadScript(String),
     /// Reading or writing a file on the device failed.
     Io(String),
     /// The persisted index could not be read back.
@@ -38,6 +42,8 @@ impl fmt::Display for Error {
             Error::NotFound(s) => write!(f, "not found: {s}"),
             Error::AlreadyExists(s) => write!(f, "already exists: {s}"),
             Error::BadMod(s) => write!(f, "bad native mod: {s}"),
+            Error::BadPack(s) => write!(f, "bad texture pack: {s}"),
+            Error::BadScript(s) => write!(f, "script error: {s}"),
             Error::Io(s) => write!(f, "io error: {s}"),
             Error::Corrupt(s) => write!(f, "corrupt index: {s}"),
         }

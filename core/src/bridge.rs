@@ -47,6 +47,8 @@ impl Failure {
             Error::NotFound(_) => "NOT_FOUND",
             Error::AlreadyExists(_) => "ALREADY_EXISTS",
             Error::BadMod(_) => "BAD_MOD",
+            Error::BadPack(_) => "BAD_PACK",
+            Error::BadScript(_) => "BAD_SCRIPT",
             Error::Io(_) => "IO",
             Error::Corrupt(_) => "CORRUPT_INDEX",
         };

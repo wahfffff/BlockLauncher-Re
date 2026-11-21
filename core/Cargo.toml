@@ -18,6 +18,9 @@ miniz_oxide = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Pure Rust JavaScript engine: the Android build already cross-compiles this
+# crate for four ABIs, and adding a C engine would mean cross-compiling that too.
+boa_engine = "0.22"
 
 # Only the Android library needs the JNI types; the host build (tests, the
 # `inspect` example) must stay buildable with nothing but rustc, which is what
