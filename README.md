@@ -22,13 +22,20 @@ rather than the roadmap restated as if it were done.
 | Version library (content-addressed import, dedupe, remove) | **done** | `cargo test` |
 | Native mod (`.nmod`) manifest validation | **done** | `cargo test` |
 | Launch planning (ABI choice, mod filtering, ordering) | **done** | `cargo test` |
-| Android UI (Compose Material 3) | not started | — |
-| JNI bridge | not started | — |
+| JNI bridge | **done** | `cargo test` for the bridge; the symbol name is checked by the APK build |
+| Android UI (Compose Material 3) | **library screen only** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 24 cases on a host machine. The format readers are tested
+`cargo test` runs 33 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
+
+### What the APK does today
+
+Import a game APK you already have, see it in the library with its package,
+version, ABIs and SHA-256, and delete it again. That is all. It does not start
+the game yet — an imported build is a file in a list, nothing more, and the
+launch button arrives with M3.
 
 ## What this launcher will not do
 
@@ -53,14 +60,25 @@ core/                     Rust, no Android dependency
   src/catalog.rs          the on-disk version library
   src/nmod.rs             native mod manifests and validation
   src/launch.rs           pure planning: build + device + mods -> plan
+  src/bridge.rs           one JSON request in, one JSON reply out
+  src/jni_glue.rs         the single JNI export; empty off-device
   examples/inspect.rs     `cargo run --example inspect -- file.apk`
-  tests/core.rs           24 host-side cases
+  tests/core.rs           24 host-side cases (+9 in src/bridge.rs)
+android/                  Kotlin + Compose Material 3
+  app/src/main/.../NativeBridge.kt   loadLibrary + the one external function
+  app/src/main/.../Core.kt           typed wrapper, every call off the main thread
+  app/src/main/.../MainActivity.kt   the library screen
 ```
 
 The split exists so the decisions can be tested without a phone. Everything the
 shell does — deciding whether a build is runnable, which mods apply, in what
 order — is a pure function in `core/`. The Android module executes the resulting
 `LaunchPlan` and does nothing clever of its own.
+
+The UI and the core meet at exactly one function: a JSON command string in, a
+JSON reply out. That is why the import path, the deduplication and the error
+codes are covered by `cargo test` rather than by tapping on a phone — one JNI
+entry point is one place for an FFI mistake instead of one per operation.
 
 ### Version ordering is not string ordering
 
@@ -107,21 +125,47 @@ No C compiler needed: the four dependencies are pure Rust.
 
 ### Android
 
-Not buildable yet — the Compose shell is the next milestone. CI is set up to run
-the core tests on every push.
+Every push builds a debug APK and uploads it as the `BlockLauncher-Re-debug`
+artifact on the workflow run. The build also *inspects* the result: it fails if
+`lib/arm64-v8a/libblre_core.so`, `lib/armeabi-v7a/libblre_core.so` or
+`classes.dex` is missing, because each of those produces an APK that installs
+cleanly and then does nothing.
+
+To build by hand you need JDK 17, Android SDK 34, NDK r27 and `cargo-ndk`:
+
+```sh
+cargo install cargo-ndk
+
+cd core
+cargo ndk --platform 23 \
+    -t arm64-v8a -t armeabi-v7a \
+    -o ../android/app/src/main/jniLibs \
+    build --release
+
+cd ../android
+gradle assembleDebug        # Gradle 8.9; no wrapper is committed on purpose
+```
+
+`cargo ndk` has to run from `core/`: it shells out to `cargo metadata` before it
+looks at any `--manifest-path`, so from the repository root it stops with
+"could not find Cargo.toml" before compiling anything.
+
+The APK is a debug build, signed with the debug key. Installing it needs
+"install unknown apps" enabled for whatever you copy it with.
 
 ## Roadmap
 
 | Milestone | Content | Gate |
 |---|---|---|
 | M1 | Core: APK inspection, library, native-mod validation, planning | `cargo test` — **done** |
-| M2 | Compose Material 3 shell + JNI bridge | CI produces an installable APK |
+| M2 | Compose Material 3 shell + JNI bridge | CI produces an installable APK — **done**; on-device look still unreviewed |
 | M3 | Launching an imported build in an isolated data directory | Real-device report |
 | M4 | Injecting native mods into the game process | Real-device report |
 
 M3 and M4 cannot be verified on a build machine; they need a device and a real
 game build, and until that happens they are described here as unverified rather
-than announced as working.
+than announced as working. The same caution applies to the M2 UI: it compiles and
+the APK is inspected, but no one has yet seen it draw a screen.
 
 ## Licence
 
