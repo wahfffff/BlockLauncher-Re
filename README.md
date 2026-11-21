@@ -176,7 +176,7 @@ reported when the package is imported rather than when the game is started.
 Overrides name a file **inside the package** and are applied onto the game's
 extracted `assets/` in the reference's order: file, then json, then text.
 
-`docs/NMOD.md` has the field table, the selection rules, the four places this
+[docs/NMOD.md](docs/NMOD.md) has the field table, the selection rules, the four places this
 port is deliberately stricter than the reference, and — more importantly — what
 is *not* implemented: extraction, patching the class loader and `dlopen` still
 live on the device side.

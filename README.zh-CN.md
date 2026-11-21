@@ -151,7 +151,7 @@ android/<support>/<abi>/lib<name>.so       载入游戏的库
 到解包后的游戏 `assets/` 上。
 
 字段表、匹配规则、本移植刻意比参考实现更严的四处，以及更重要的一点——**没做**的
-部分（解包、改 class loader、`dlopen` 仍然在设备侧），都在 `docs/NMOD.md`。
+部分（解包、改 class loader、`dlopen` 仍然在设备侧），都在 [docs/NMOD.md](docs/NMOD.md)。
 
 ## 构建
 
