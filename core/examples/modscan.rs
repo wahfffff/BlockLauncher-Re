@@ -24,7 +24,7 @@ fn main() {
             "{:<28} {:<7} {:<14} {}",
             e.file_name,
             match e.kind {
-                mods::Kind::Native => "native",
+                mods::Kind::Nmod => "nmod",
                 mods::Kind::Legacy => "legacy",
             },
             if e.author.is_empty() { "-" } else { &e.author },

@@ -53,14 +53,14 @@ rather than the roadmap restated as if it were done.
 | Version library (content-addressed import, dedupe, remove) | **done** | `cargo test` |
 | Texture packs (import, real texture count, enable/disable) | **done** | `cargo test` |
 | ModPE script runtime (globals, hooks, bounded execution) | **done off-device** | `cargo test`; the game side is not attached yet |
-| Native mod (`.nmod`) manifest validation | **done** | `cargo test` |
+| nmod packages (zip + manifest, overrides, per-ABI libraries) | **done off-device** | `cargo test`; nothing is extracted or loaded yet |
 | Legacy `.mod` patches (PTP container: author line, payload size) | **read only** | `cargo test` against 8 real files; the payload is not applied — see `docs/LEGACY-MOD.md` |
 | Launch planning (ABI choice, mod filtering, ordering) | **done** | `cargo test` |
 | JNI bridge | **done** | `cargo test` for the bridge; the symbol name is checked by the APK build |
 | Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 105 cases on a host machine. The format readers are tested
+`cargo test` runs 125 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 
@@ -109,12 +109,12 @@ core/                     Rust, no Android dependency
   src/pack.rs             texture packs: import, texture count, enable/disable
   src/script.rs           the ModPE contract: Host trait, API table, Limits
   src/script_engine.rs    those globals bound to a JavaScript engine (Boa)
-  src/nmod.rs             native mod manifests and validation
+  src/nmod.rs             nmod packages: manifest, overrides, per-ABI libs
   src/launch.rs           pure planning: build + device + mods -> plan
   src/bridge.rs           one JSON request in, one JSON reply out
   src/jni_glue.rs         the single JNI export; empty off-device
   examples/inspect.rs     `cargo run --example inspect -- file.apk`
-  tests/core.rs           24 host-side cases (+46 in src/)
+  tests/core.rs           23 host-side cases (+102 in src/)
 android/                  Kotlin + Compose Material 3
   app/src/main/.../NativeBridge.kt   loadLibrary + the one external function
   app/src/main/.../Core.kt           typed wrapper, every call off the main thread
@@ -140,27 +140,46 @@ like `b1` as a pre-release.
 
 ### Native mods
 
-A native mod is a `.so` loaded into the game process. There is no sandboxing
-possible for an injected library, so the only defence is refusing ambiguity at
-install time:
+This is the **nmod** format: the one ModdedMCPE and EnderCore use, and what
+BlockLauncher's native mods became. It is a zip with `nmod_manifest.json` at its
+root:
+
+```
+nmod_manifest.json
+android/<support>/assets/<path>            overrides for the game's assets/
+android/<support>/<abi>/lib<name>.so       libraries loaded into the game
+```
+
+A manifest names the game versions it supports as **regular expressions over the
+version name**, not as a range:
 
 ```json
 {
-  "schema": 1,
-  "id": "example-mod",
+  "uuid": "0f8fad5b-d9cb-469f-a165-70867728950e",
   "name": "Example Mod",
-  "version": "1.0.0",
-  "entry": "libexample.so",
-  "abis": ["armeabi-v7a", "arm64-v8a"],
-  "min_game": "0.14.0",
-  "max_game": "1.1.5"
+  "version_name": "1.0", "version_code": 1,
+  "manifest_version": 1, "min_sdk_version": 1, "target_sdk_version": 1,
+  "game_supports": [{
+    "platform": "android",
+    "name": "pe",
+    "target_game_versions": ["0\\.14\\..*"],
+    "native_libs": [{ "name": "example" }],
+    "file_overrides": [{ "path": "textures/terrain.png" }],
+    "json_overrides": [{ "path": "data/items.json", "mode": "merge" }],
+    "text_overrides": [{ "path": "lang/en_US.lang", "mode": "append" }]
+  }]
 }
 ```
 
-`entry` cannot be a path, `abis` must name known ABIs, and every declared ABI has
-to actually ship its library — a mod that claims `arm64-v8a` and contains only
-32-bit code is rejected at import instead of failing at `dlopen` with a message
-nobody can act on.
+`0\.14\..*` is a version family; `*` on its own is a syntax error and is now
+reported when the package is imported rather than when the game is started.
+Overrides name a file **inside the package** and are applied onto the game's
+extracted `assets/` in the reference's order: file, then json, then text.
+
+`docs/NMOD.md` has the field table, the selection rules, the four places this
+port is deliberately stricter than the reference, and — more importantly — what
+is *not* implemented: extraction, patching the class loader and `dlopen` still
+live on the device side.
 
 ## Building
 
@@ -172,7 +191,7 @@ cargo test
 cargo run --example inspect -- /path/to/game.apk
 ```
 
-No C compiler needed: the four dependencies are pure Rust.
+No C compiler needed: the five dependencies are pure Rust.
 
 ### Android
 

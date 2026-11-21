@@ -83,12 +83,13 @@ data class ModEntry(
     val usable: Boolean,
     val reason: String,
     val detail: String,
+    val warnings: List<String> = emptyList(),
 ) {
     val displayName: String
         get() = title.takeIf { it.isNotBlank() } ?: fileName
 
     val kindLabel: String
-        get() = if (kind == "native") "原生 mod" else "旧版补丁"
+        get() = if (kind == "nmod") "原生 mod" else "旧版补丁"
 }
 
 /**
@@ -291,15 +292,19 @@ object Core {
 
     // ------------------------------------------------------------------ mods
 
-    private fun parseMod(o: JSONObject): ModEntry = ModEntry(
-        fileName = o.optString("file_name"),
-        kind = o.optString("kind", "legacy"),
-        title = o.optString("title"),
-        author = o.optString("author"),
-        usable = o.optBoolean("usable", false),
-        reason = o.optString("reason"),
-        detail = o.optString("detail"),
-    )
+    private fun parseMod(o: JSONObject): ModEntry {
+        val warnings = o.optJSONArray("warnings")
+        return ModEntry(
+            fileName = o.optString("file_name"),
+            kind = o.optString("kind", "legacy"),
+            title = o.optString("title"),
+            author = o.optString("author"),
+            usable = o.optBoolean("usable", false),
+            reason = o.optString("reason"),
+            detail = o.optString("detail"),
+            warnings = (0 until (warnings?.length() ?: 0)).map { warnings!!.optString(it) },
+        )
+    }
 
     suspend fun scanMods(dir: String): List<ModEntry> = withContext(Dispatchers.IO) {
         val data = call(JSONObject().put("cmd", "mods.scan").put("dir", dir).toString())

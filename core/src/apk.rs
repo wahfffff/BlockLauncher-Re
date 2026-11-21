@@ -128,6 +128,12 @@ impl<'a> Apk<'a> {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
+    /// The parsed central directory, for callers that want to keep their own
+    /// copy of it (`nmod` does, because `Apk` borrows the archive).
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name == name)
     }

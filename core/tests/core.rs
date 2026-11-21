@@ -10,7 +10,7 @@ use blre_core::apk;
 use blre_core::axml;
 use blre_core::catalog::Library;
 use blre_core::launch::{self, Rejection};
-use blre_core::nmod::{Nmod, NmodManifest};
+use blre_core::nmod::{self, Package};
 use blre_core::version::{GameRange, GameVersion};
 use blre_core::Error;
 
@@ -485,67 +485,78 @@ fn game_range_is_inclusive() {
 
 // -------------------------------------------------------------------- nmod
 
-fn manifest(id: &str, abis: &[&str]) -> NmodManifest {
-    NmodManifest {
-        schema: 1,
-        id: id.to_string(),
-        name: "Test Mod".into(),
-        version: "1.0.0".into(),
-        entry: "libtest.so".into(),
-        abis: abis.iter().map(|s| s.to_string()).collect(),
-        min_game: None,
-        max_game: None,
-        description: None,
-    }
+/// A valid nmod package as bytes. The real format is a zip with
+/// `nmod_manifest.json` at the root — the shape ModdedMCPE's
+/// `NModPackage` reads — so the fixtures are zips, not directories.
+fn nmod_zip(name: &str, extra_support: &str, files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let manifest = format!(
+        r#"{{"uuid":"0f8fad5b-d9cb-469f-a165-70867728950e","name":"{name}",
+            "version_name":"1.0","version_code":1,"manifest_version":1,
+            "min_sdk_version":1,"target_sdk_version":1,"author":"tester",
+            "game_supports":[{{"platform":"android","name":"pe",
+            "target_game_versions":["0\\.14\\..*"]{extra_support}}}]}}"#
+    );
+    let mut entries: Vec<(&str, Vec<u8>)> = vec![(nmod::MANIFEST, manifest.into_bytes())];
+    entries.extend(files.iter().map(|(n, d)| (*n, d.clone())));
+    zip_stored(&entries)
 }
 
 #[test]
-fn valid_nmod_passes() {
-    manifest("example", &["armeabi-v7a"]).validate().unwrap();
-}
+fn an_nmod_package_applies_its_overrides() {
+    let extra = r#","file_overrides":[{"path":"textures/terrain.png"}]"#;
+    let files = vec![("android/pe/assets/textures/terrain.png", b"NEW".to_vec())];
+    let pkg = Package::open(nmod_zip("Pack", extra, &files)).unwrap();
 
-#[test]
-fn nmod_entry_may_not_be_a_path() {
-    let mut m = manifest("example", &["armeabi-v7a"]);
-    m.entry = "../../libc.so".into();
-    assert!(matches!(m.validate().unwrap_err(), Error::BadMod(_)));
-}
+    let support = pkg.support_for("0.14.3").unwrap().expect("0.14.3 matches");
+    assert!(pkg.support_for("1.0.0").unwrap().is_none());
 
-#[test]
-fn nmod_must_declare_a_known_abi() {
-    let m = manifest("example", &["mips"]);
-    assert!(matches!(m.validate().unwrap_err(), Error::BadMod(_)));
-
-    let empty = manifest("example", &[]);
-    assert!(matches!(empty.validate().unwrap_err(), Error::BadMod(_)));
-}
-
-#[test]
-fn nmod_rejects_a_reversed_version_range() {
-    let mut m = manifest("example", &["armeabi-v7a"]);
-    m.min_game = Some("1.2.0".into());
-    m.max_game = Some("1.0.0".into());
-    assert!(matches!(m.validate().unwrap_err(), Error::BadMod(_)));
-}
-
-#[test]
-fn nmod_load_verifies_the_declared_abi_is_present() {
-    let dir = TempDir::new("nmod");
+    let dir = TempDir::new("nmod-apply");
     let root = dir.path();
+    std::fs::create_dir_all(root.join("textures")).unwrap();
+    std::fs::write(root.join("textures/terrain.png"), b"OLD").unwrap();
 
-    let m = manifest("example", &["armeabi-v7a"]);
-    std::fs::write(root.join("nmod.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+    let applied = nmod::apply(&pkg, support, root).unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].kind, "file");
+    assert_eq!(std::fs::read(root.join("textures/terrain.png")).unwrap(), b"NEW");
+}
 
-    // Declared but not shipped: must fail at load, not at dlopen.
-    let err = Nmod::load(root).unwrap_err();
-    assert!(matches!(err, Error::BadMod(_)), "got {err:?}");
+#[test]
+fn an_nmod_manifest_must_sit_at_the_root() {
+    let manifest = br#"{"uuid":"0f8fad5b-d9cb-469f-a165-70867728950e","name":"x",
+        "version_name":"1","version_code":1,"manifest_version":1,
+        "min_sdk_version":1,"target_sdk_version":1,
+        "game_supports":[{"platform":"android","name":"pe","target_game_versions":[".*"]}]}"#;
+    let bytes = zip_stored(&[("sub/nmod_manifest.json", manifest.to_vec())]);
+    let e = Package::open(bytes).unwrap_err();
+    assert!(e.to_string().contains("top level"), "{e}");
+}
 
-    std::fs::create_dir_all(root.join("lib/armeabi-v7a")).unwrap();
-    std::fs::write(root.join("lib/armeabi-v7a/libtest.so"), b"\x7fELF").unwrap();
-    let n = Nmod::load(root).unwrap();
-    assert_eq!(n.manifest.id, "example");
-    assert!(n.lib_path("armeabi-v7a").is_some());
-    assert!(n.lib_path("arm64-v8a").is_none());
+#[test]
+fn nmod_reports_missing_optional_metadata_as_warnings() {
+    let pkg = Package::open(nmod_zip("Pack", "", &[])).unwrap();
+    // author supplied by the fixture; icon, banner and author_email are not.
+    let joined = pkg.warnings().join("; ");
+    assert!(joined.contains("author_email"), "{joined}");
+    assert!(joined.contains("icon"), "{joined}");
+    assert!(joined.contains("banner"), "{joined}");
+}
+
+#[test]
+fn nmod_selects_native_libraries_for_the_abi() {
+    let extra = r#","native_libs":[{"name":"mymod"}]"#;
+    let files = vec![
+        ("android/pe/arm64-v8a/libmymod.so", b"\x7fELF".to_vec()),
+        ("android/pe/armeabi-v7a/libmymod.so", b"\x7fELF".to_vec()),
+    ];
+    let pkg = Package::open(nmod_zip("Pack", extra, &files)).unwrap();
+    let support = pkg.support_for("0.14.2").unwrap().unwrap();
+    assert_eq!(
+        pkg.native_libs(support, "arm64-v8a"),
+        vec!["android/pe/arm64-v8a/libmymod.so".to_string()]
+    );
+    assert!(pkg.native_libs(support, "x86").is_empty());
+    assert_eq!(pkg.shipped_abis(support), vec!["arm64-v8a", "armeabi-v7a"]);
 }
 
 // ----------------------------------------------------------------- catalog
@@ -622,6 +633,27 @@ fn importing_garbage_does_not_touch_the_index() {
 
 // ------------------------------------------------------------------ launch
 
+/// One nmod package for one ABI, matched against `versions` (a JSON array of
+/// Java-style patterns).
+fn launch_mod(uuid: &str, versions: &str, abi: &str) -> Package {
+    let manifest = format!(
+        r#"{{"uuid":"{uuid}","name":"Mod {uuid}","version_name":"1","version_code":1,
+            "manifest_version":1,"min_sdk_version":1,"target_sdk_version":1,
+            "game_supports":[{{"platform":"android","name":"pe",
+            "target_game_versions":{versions},
+            "native_libs":[{{"name":"mymod"}}]}}]}}"#
+    );
+    let owned: Vec<(String, Vec<u8>)> = vec![
+        (nmod::MANIFEST.to_string(), manifest.into_bytes()),
+        (
+            format!("android/pe/{abi}/libmymod.so"),
+            b"\x7fELF".to_vec(),
+        ),
+    ];
+    let refs: Vec<(&str, Vec<u8>)> = owned.iter().map(|(n, d)| (n.as_str(), d.clone())).collect();
+    Package::open(zip_stored(&refs)).unwrap()
+}
+
 #[test]
 fn plan_picks_the_device_abi_and_keeps_compatible_mods() {
     let dir = TempDir::new("plan");
@@ -633,43 +665,38 @@ fn plan_picks_the_device_abi_and_keeps_compatible_mods() {
 
     let device = vec!["arm64-v8a".to_string(), "armeabi-v7a".to_string()];
 
-    // One mod for the device ABI, one for a different ABI, one that names a
-    // version range this build is outside.
-    let mk = |id: &str, abi: &str, min: Option<&str>, max: Option<&str>| {
-        let mut m = manifest(id, &[abi]);
-        m.min_game = min.map(|s| s.to_string());
-        m.max_game = max.map(|s| s.to_string());
-        let root = dir.path().join("mods").join(id);
-        std::fs::create_dir_all(root.join("lib").join(abi)).unwrap();
-        std::fs::write(root.join("lib").join(abi).join("libtest.so"), b"\x7fELF").unwrap();
-        std::fs::write(root.join("nmod.json"), serde_json::to_vec(&m).unwrap()).unwrap();
-        Nmod::load(&root).unwrap()
-    };
+    let alpha = launch_mod("0f8fad5b-d9cb-469f-a165-708677289501", r#"["0\\.14\\..*"]"#, "arm64-v8a");
+    let beta = launch_mod("0f8fad5b-d9cb-469f-a165-708677289502", r#"["0\\.14\\..*"]"#, "x86");
+    let gamma = launch_mod("0f8fad5b-d9cb-469f-a165-708677289503", r#"["1\\.0\\..*"]"#, "arm64-v8a");
 
-    let mods = vec![
-        mk("alpha", "arm64-v8a", None, None),
-        mk("beta", "x86", None, None),
-        mk("gamma", "arm64-v8a", Some("1.0.0"), Some("2.0.0")),
-    ];
-
-    let game = GameVersion::parse("0.14.0").unwrap();
-    let (plan, rejected) = launch::build(&entry, &game, &device, &mods, "/data/inst/1").unwrap();
+    let mods = vec![&alpha, &beta, &gamma];
+    let (plan, rejected) = launch::build(&entry, &device, &mods, "/data/inst/1").unwrap();
 
     assert_eq!(plan.abi, "arm64-v8a");
     assert_eq!(plan.package, "com.mojang.minecraftpe");
     assert_eq!(plan.activity, "com.mojang.minecraftpe.MainActivity");
     assert_eq!(plan.data_dir, "/data/inst/1");
     assert_eq!(
-        plan.mods.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        vec!["alpha"]
+        plan.mods
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["0f8fad5b-d9cb-469f-a165-708677289501"]
+    );
+    assert_eq!(
+        plan.mods[0].libs,
+        vec!["android/pe/arm64-v8a/libmymod.so".to_string()]
     );
 
     assert_eq!(rejected.len(), 2);
-    assert!(rejected.iter().any(|r| r.id == "beta"
-        && matches!(&r.reason, Rejection::Abi { wanted, .. } if wanted == "arm64-v8a")));
     assert!(rejected
         .iter()
-        .any(|r| r.id == "gamma" && matches!(r.reason, Rejection::Game { .. })));
+        .any(|r| r.id == "0f8fad5b-d9cb-469f-a165-708677289502"
+            && matches!(&r.reason, Rejection::Abi { wanted, .. } if wanted == "arm64-v8a")));
+    assert!(rejected
+        .iter()
+        .any(|r| r.id == "0f8fad5b-d9cb-469f-a165-708677289503"
+            && matches!(&r.reason, Rejection::Version { wanted, .. } if wanted == "0.14.0")));
 }
 
 #[test]
@@ -682,8 +709,8 @@ fn plan_refuses_a_build_the_device_cannot_run() {
         .entry;
 
     let device = vec!["arm64-v8a".to_string()];
-    let game = GameVersion::parse("1.0.0").unwrap();
-    let err = launch::build(&entry, &game, &device, &[], "/d").unwrap_err();
+    let mods: Vec<&Package> = Vec::new();
+    let err = launch::build(&entry, &device, &mods, "/d").unwrap_err();
     assert!(matches!(err, Error::UnusableManifest(_)), "got {err:?}");
 }
 
@@ -697,23 +724,18 @@ fn plan_is_deterministic_regardless_of_mod_order() {
         .entry;
     let device = vec!["armeabi-v7a".to_string()];
 
-    let mk = |id: &str| {
-        let m = manifest(id, &["armeabi-v7a"]);
-        let root = dir.path().join("mods").join(id);
-        std::fs::create_dir_all(root.join("lib/armeabi-v7a")).unwrap();
-        std::fs::write(root.join("lib/armeabi-v7a/libtest.so"), b"\x7fELF").unwrap();
-        std::fs::write(root.join("nmod.json"), serde_json::to_vec(&m).unwrap()).unwrap();
-        Nmod::load(&root).unwrap()
-    };
-    let a = mk("aaa");
-    let z = mk("zzz");
-    let game = GameVersion::parse("1.0.0").unwrap();
+    // uuids deliberately assorted, so sorting by them is visible.
+    let a = launch_mod("0f8fad5b-d9cb-469f-a165-7086772895aa", r#"["0\\.14\\..*"]"#, "armeabi-v7a");
+    let z = launch_mod("0f8fad5b-d9cb-469f-a165-7086772895ff", r#"["0\\.14\\..*"]"#, "armeabi-v7a");
 
-    let (p1, _) = launch::build(&entry, &game, &device, &[a.clone(), z.clone()], "/d").unwrap();
-    let (p2, _) = launch::build(&entry, &game, &device, &[z, a], "/d").unwrap();
+    let (p1, _) = launch::build(&entry, &device, &[&a, &z], "/d").unwrap();
+    let (p2, _) = launch::build(&entry, &device, &[&z, &a], "/d").unwrap();
     assert_eq!(p1, p2);
     assert_eq!(
         p1.mods.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        vec!["aaa", "zzz"]
+        vec![
+            "0f8fad5b-d9cb-469f-a165-7086772895aa",
+            "0f8fad5b-d9cb-469f-a165-7086772895ff"
+        ]
     );
 }

@@ -48,14 +48,14 @@ APK 也可以直接发文件——
 | 版本库（按内容哈希导入、去重、删除） | **已完成** | `cargo test` |
 | 材质包（导入、真实贴图计数、启用/停用） | **已完成** | `cargo test` |
 | ModPE 脚本运行时（全局函数、钩子、执行预算） | **已完成（未接游戏）** | `cargo test`；游戏那一侧还没有实现 |
-| 原生 mod（`.nmod`）清单校验 | **已完成** | `cargo test` |
+| nmod 包（zip + 清单、覆盖项、按 ABI 的库） | **离线完成** | `cargo test`；还没有解包与加载 |
 | 旧版 `.mod` 补丁（PTP 容器：作者行、载荷大小） | **只读** | `cargo test` 覆盖 8 个真实文件；载荷不会被应用，见 `docs/LEGACY-MOD.md` |
 | 启动计划（ABI 选择、mod 过滤与排序） | **已完成** | `cargo test` |
 | JNI 桥 | **已完成** | 桥本身由 `cargo test` 覆盖；符号名由打包检查兜底 |
 | Android 界面（Compose Material 3） | **三个列表** | CI 构建并检查 APK；还没人在真机上打开过 |
 | 真正的启动 / 注入 | 未开始 | — |
 
-`cargo test` 在主机上跑 105 个用例。格式解析器的测试文件**逐字节构造**归档，
+`cargo test` 在主机上跑 125 个用例。格式解析器的测试文件**逐字节构造**归档，
 所以测试不会因为和解析器犯了同一个错误而通过。
 
 ### 现在这个 APK 能做什么
@@ -89,7 +89,7 @@ core/                     Rust，不依赖 Android
   src/apk.rs              最小 ZIP 读取器 + APK 解析
   src/version.rs          Minecraft 版本比较（不是 semver）
   src/catalog.rs          磁盘上的版本库
-  src/nmod.rs             原生 mod 清单与校验
+  src/nmod.rs             nmod 包：清单、覆盖项、按 ABI 的库
   src/launch.rs           纯规划：版本 + 设备 + mod -> 启动计划
   src/bridge.rs           一条 JSON 请求进，一条 JSON 回复出
   src/jni_glue.rs         唯一的 JNI 导出；非 Android 平台为空
@@ -117,25 +117,41 @@ Minecraft PE 的版本号是 `0.1.1`、`0.14.0`、`1.1.5.1`、`1.16.201.01`、`0
 
 ### 原生 mod
 
-原生 mod 是被加载进游戏进程的 `.so`。对已注入的库而言沙箱是不可能的，所以唯一的
-防线是**在安装阶段拒绝歧义**：
+用的是 **nmod** 格式：ModdedMCPE 与 EnderCore 的那一套，也是 BlockLauncher 原生
+mod 后来变成的样子。它就是一个 zip，`nmod_manifest.json` 放在根目录：
+
+```
+nmod_manifest.json
+android/<support>/assets/<path>            覆盖游戏 assets/ 里的文件
+android/<support>/<abi>/lib<name>.so       载入游戏的库
+```
+
+清单里的游戏版本是**版本名上的正则表达式**，不是一个区间：
 
 ```json
 {
-  "schema": 1,
-  "id": "example-mod",
+  "uuid": "0f8fad5b-d9cb-469f-a165-70867728950e",
   "name": "Example Mod",
-  "version": "1.0.0",
-  "entry": "libexample.so",
-  "abis": ["armeabi-v7a", "arm64-v8a"],
-  "min_game": "0.14.0",
-  "max_game": "1.1.5"
+  "version_name": "1.0", "version_code": 1,
+  "manifest_version": 1, "min_sdk_version": 1, "target_sdk_version": 1,
+  "game_supports": [{
+    "platform": "android",
+    "name": "pe",
+    "target_game_versions": ["0\\.14\\..*"],
+    "native_libs": [{ "name": "example" }],
+    "file_overrides": [{ "path": "textures/terrain.png" }],
+    "json_overrides": [{ "path": "data/items.json", "mode": "merge" }],
+    "text_overrides": [{ "path": "lang/en_US.lang", "mode": "append" }]
+  }]
 }
 ```
 
-`entry` 不能是路径，`abis` 必须是已知 ABI，且每个声明的 ABI 必须真的提供对应的库
-文件——一个声称支持 `arm64-v8a` 却只有 32 位代码的 mod，会在导入时被拒绝，而不是
-在 `dlopen` 时抛出一条没人看得懂的错误。
+`0\.14\..*` 是一个版本族；单独写 `*` 是语法错误，现在会在**导入时**报出来，而不是
+等游戏启动。覆盖项指向的是**包内**的文件，按参考实现的顺序（file、json、text）应用
+到解包后的游戏 `assets/` 上。
+
+字段表、匹配规则、本移植刻意比参考实现更严的四处，以及更重要的一点——**没做**的
+部分（解包、改 class loader、`dlopen` 仍然在设备侧），都在 `docs/NMOD.md`。
 
 ## 构建
 
@@ -147,7 +163,7 @@ cargo test
 cargo run --example inspect -- /path/to/game.apk
 ```
 
-不需要 C 编译器：四个依赖都是纯 Rust。
+不需要 C 编译器：五个依赖都是纯 Rust。
 
 ### Android
 

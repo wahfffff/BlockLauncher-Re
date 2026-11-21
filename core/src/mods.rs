@@ -2,8 +2,8 @@
 //!
 //! There are two unrelated things people call a mod here:
 //!
-//! * a **native mod** — a directory with `nmod.json` and a `.so` per ABI, read by
-//!   [`crate::nmod`];
+//! * an **nmod** — a zip with `nmod_manifest.json`, read by [`crate::nmod`], the
+//!   format ModdedMCPE/EnderCore use and what BlockLauncher's native mods became;
 //! * a **legacy patch** — a single `.mod` file in the `PTP` container, read by
 //!   [`crate::legacy`], which this build can describe but not apply.
 //!
@@ -12,9 +12,9 @@
 //! kind cannot run, and saying so at list time is the difference between a mod
 //! that fails at game start and one the user knows not to install.
 
-use crate::error::Result;
-use crate::legacy::{self, LegacyMod};
-use crate::nmod::Nmod;
+use crate::error::{Error, Result};
+use crate::legacy;
+use crate::nmod;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -26,11 +26,16 @@ const MAX_ENTRIES: usize = 512;
 /// bytes. Refusing early also stops a mis-named 200 MB file from being read.
 const MAX_LEGACY_BYTES: u64 = 64 * 1024;
 
+/// A mod package is a zip holding assets and libraries; 256 MiB is already an
+/// order of magnitude past any real one, and reading it whole is what lets the
+/// zip be parsed without a seekable file handle on Android.
+const MAX_NMOD_BYTES: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// `nmod.json` + `lib/<abi>/<entry>`.
-    Native,
+    /// Zip with `nmod_manifest.json`.
+    Nmod,
     /// Single-file `PTP` patch.
     Legacy,
 }
@@ -38,11 +43,11 @@ pub enum Kind {
 /// One row in the mod list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Entry {
-    /// Bare name on disk: the directory name or the file name.
+    /// Bare name on disk.
     pub file_name: String,
-    /// `native` or `legacy`.
+    /// `nmod` or `legacy`.
     pub kind: Kind,
-    /// What to show as the title: the manifest name, the author, or the file stem.
+    /// What to show as the title: the manifest name, or the file stem.
     pub title: String,
     /// Who made it, when the format records that.
     pub author: String,
@@ -50,8 +55,10 @@ pub struct Entry {
     pub usable: bool,
     /// Empty when usable; otherwise the sentence explaining why not.
     pub reason: String,
-    /// Free-form extra: ABIs for a native mod, payload size for a patch.
+    /// Free-form extra: version and supports for an nmod, payload size for a patch.
     pub detail: String,
+    /// Non-fatal problems the package declared (missing icon, missing author).
+    pub warnings: Vec<String>,
     pub path: String,
 }
 
@@ -65,9 +72,17 @@ impl Entry {
             usable: false,
             reason,
             detail: String::new(),
+            warnings: Vec::new(),
             path: path.to_string_lossy().into_owned(),
         }
     }
+}
+
+fn extension(name: &str) -> Option<String> {
+    name.rsplit_once('.')
+        .map(|(stem, ext)| (stem, ext.to_ascii_lowercase()))
+        .filter(|(stem, _)| !stem.is_empty())
+        .map(|(_, ext)| ext)
 }
 
 /// List the mods directly inside `dir`, sorted by file name.
@@ -78,10 +93,10 @@ pub fn scan(dir: &Path) -> Result<Vec<Entry>> {
     let mut out: Vec<Entry> = Vec::new();
 
     let read = std::fs::read_dir(dir).map_err(|e| {
-        crate::error::Error::BadMod(format!("cannot read {}: {e}", dir.display()))
+        Error::BadMod(format!("cannot read {}: {e}", dir.display()))
     })?;
 
-    let mut names: Vec<PathBuf> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     for item in read {
         let item = match item {
             Ok(i) => i,
@@ -89,73 +104,116 @@ pub fn scan(dir: &Path) -> Result<Vec<Entry>> {
             // one permission-denied file should not hide the other nine.
             Err(_) => continue,
         };
-        names.push(item.path());
-        if names.len() > MAX_ENTRIES {
+        paths.push(item.path());
+        if paths.len() > MAX_ENTRIES {
             break;
         }
     }
-    names.sort();
+    paths.sort();
 
-    for path in names {
+    for path in paths {
         let meta = match std::fs::metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
+        if !meta.is_file() {
+            continue;
+        }
         let file_name = match path.file_name().and_then(|s| s.to_str()) {
             Some(s) => s.to_owned(),
             None => continue,
         };
+        let Some(ext) = extension(&file_name) else {
+            continue;
+        };
 
-        if meta.is_dir() {
-            if !path.join(crate::nmod::MANIFEST_FILE).is_file() {
-                continue;
+        match ext.as_str() {
+            "mod" => out.push(read_legacy(&path, file_name, meta.len())),
+            "nmod" | "zip" => {
+                // A zip is only a mod if it says so; anything else in the folder
+                // (a texture pack, an APK someone dropped) must not appear here.
+                if let Some(entry) = read_nmod(&path, file_name, meta.len()) {
+                    out.push(entry);
+                }
             }
-            out.push(read_native(&path, file_name));
-            continue;
+            _ => {}
         }
-
-        if !is_legacy_name(&file_name) {
-            continue;
-        }
-        out.push(read_legacy(&path, file_name, meta.len()));
     }
 
     Ok(out)
 }
 
-fn is_legacy_name(name: &str) -> bool {
-    name.rsplit_once('.')
-        .map(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("mod"))
-        .unwrap_or(false)
-}
-
-fn stem(name: &str) -> String {
-    name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_owned()
-}
-
-fn read_native(root: &Path, file_name: String) -> Entry {
-    match Nmod::load(root) {
-        Ok(n) => Entry {
+fn read_nmod(path: &Path, file_name: String, len: u64) -> Option<Entry> {
+    if len > MAX_NMOD_BYTES {
+        return Some(Entry::unusable(
+            Kind::Nmod,
             file_name,
-            kind: Kind::Native,
-            title: n.manifest.name.clone(),
-            author: String::new(),
-            usable: true,
-            reason: String::new(),
-            detail: format!("native for {}", n.manifest.abis.join(", ")),
-            path: root.to_string_lossy().into_owned(),
-        },
-        Err(e) => Entry::unusable(
-            Kind::Native,
-            file_name.clone(),
-            root,
-            e.to_string(),
-        ),
+            path,
+            format!("{len} bytes is larger than the {MAX_NMOD_BYTES} byte limit"),
+        ));
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Some(Entry::unusable(
+                Kind::Nmod,
+                file_name,
+                path,
+                format!("cannot read: {e}"),
+            ))
+        }
+    };
+
+    // Not an nmod is not a broken nmod: skip silently so a folder holding both
+    // mods and texture packs lists only the mods.
+    if !looks_like_nmod(&bytes) {
+        return None;
+    }
+
+    Some(match nmod::Package::open(bytes) {
+        Ok(p) => {
+            let supports = p.support_names();
+            Entry {
+                file_name,
+                kind: Kind::Nmod,
+                title: p.name().to_string(),
+                author: p.author().to_string(),
+                usable: true,
+                reason: String::new(),
+                detail: format!(
+                    "nmod {} · {}",
+                    p.version_name(),
+                    if supports.is_empty() {
+                        "no game supports".to_string()
+                    } else {
+                        supports.join(", ")
+                    }
+                ),
+                warnings: p.warnings().to_vec(),
+                path: path.to_string_lossy().into_owned(),
+            }
+        }
+        Err(e) => Entry::unusable(Kind::Nmod, file_name.clone(), path, e.to_string()),
+    })
+}
+
+/// Cheap pre-check: does the zip contain `nmod_manifest.json`?
+///
+/// Reads only the central directory (the whole buffer is already in memory), so
+/// this costs nothing beyond the parse that `Package::open` would do anyway and
+/// keeps a plain `.zip` from being reported as a broken mod.
+fn looks_like_nmod(bytes: &[u8]) -> bool {
+    match crate::apk::Apk::open(bytes) {
+        Ok(zip) => zip.entry(nmod::MANIFEST).is_some(),
+        Err(_) => false,
     }
 }
 
 fn read_legacy(path: &Path, file_name: String, len: u64) -> Entry {
-    let fallback_title = stem(&file_name);
+    let fallback_title = file_name
+        .rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| file_name.clone());
 
     if len > MAX_LEGACY_BYTES {
         return Entry::unusable(
@@ -183,9 +241,9 @@ fn read_legacy(path: &Path, file_name: String, len: u64) -> Entry {
             // separated, and the reason is repeated on the row rather than left
             // to the documentation.
             usable: false,
-            reason: "legacy PTP patch: this build can read it but cannot apply it"
-                .to_string(),
+            reason: "legacy PTP patch: this build can read it but cannot apply it".to_string(),
             detail: format!("{} byte payload", m.payload.len()),
+            warnings: Vec::new(),
             path: path.to_string_lossy().into_owned(),
         },
         Err(e) => Entry::unusable(Kind::Legacy, file_name, path, e.to_string()),
@@ -196,7 +254,7 @@ fn read_legacy(path: &Path, file_name: String, len: u64) -> Entry {
 ///
 /// Exists so the opaque bytes are reachable without re-reading the file, and so
 /// the tests can assert that the bytes survive the round trip.
-pub fn legacy_payload(bytes: &[u8]) -> Result<LegacyMod> {
+pub fn legacy_payload(bytes: &[u8]) -> Result<legacy::LegacyMod> {
     legacy::parse(bytes)
 }
 
@@ -222,19 +280,19 @@ mod tests {
         p
     }
 
-    /// The shape a native mod directory has to have for `Nmod::load` to accept it.
-    fn write_native(dir: &Path, name: &str, id: &str) -> PathBuf {
-        let root = dir.join(name);
-        fs::create_dir_all(root.join("lib/arm64-v8a")).unwrap();
-        fs::write(
-            root.join("nmod.json"),
-            format!(
-                r#"{{"schema":1,"id":"{id}","name":"Test mod","version":"1.0","entry":"libtest.so","abis":["arm64-v8a"]}}"#
-            ),
-        )
-        .unwrap();
-        fs::write(root.join("lib/arm64-v8a/libtest.so"), b"\x7fELF").unwrap();
-        root
+    /// Smallest valid nmod the reader accepts, stored uncompressed.
+    fn nmod_bytes(name: &str) -> Vec<u8> {
+        let manifest = format!(
+            r#"{{"uuid":"0f8fad5b-d9cb-469f-a165-70867728950e","name":"{name}",
+                "version_name":"1.0","version_code":1,"manifest_version":1,
+                "min_sdk_version":1,"target_sdk_version":1,"author":"me",
+                "game_supports":[{{"platform":"android","name":"pe",
+                "target_game_versions":["0\\.14\\..*"]}}]}}"#
+        );
+        crate::tests_support::zip_stored(&[
+            (nmod::MANIFEST, manifest.into_bytes()),
+            ("android/pe/assets/a.txt", b"A".to_vec()),
+        ])
     }
 
     #[test]
@@ -259,32 +317,42 @@ mod tests {
     }
 
     #[test]
-    fn a_native_mod_is_listed_as_usable() {
-        let d = tmp("native");
-        write_native(&d, "coolmod", "coolmod");
+    fn an_nmod_package_is_listed_as_usable() {
+        let d = tmp("nmod");
+        fs::write(d.join("cool.nmod"), nmod_bytes("Cool Pack")).unwrap();
         let list = scan(&d).unwrap();
         assert_eq!(list.len(), 1);
         let e = &list[0];
-        assert_eq!(e.kind, Kind::Native);
-        assert_eq!(e.title, "Test mod");
-        assert!(e.usable);
-        assert!(e.reason.is_empty());
-        assert_eq!(e.detail, "native for arm64-v8a");
+        assert_eq!(e.kind, Kind::Nmod);
+        assert_eq!(e.title, "Cool Pack");
+        assert_eq!(e.author, "me");
+        assert!(e.usable, "{}", e.reason);
+        assert_eq!(e.detail, "nmod 1.0 · pe");
     }
 
-    /// A native mod that promises an ABI it does not ship must appear in the
-    /// list with the reason, not vanish — the user needs to see the broken thing
-    /// they installed.
+    /// A broken package stays visible: the user needs to see the thing they
+    /// installed, with the reason the manifest gave.
     #[test]
-    fn a_broken_native_mod_is_listed_with_its_reason() {
-        let d = tmp("brokennative");
-        let root = write_native(&d, "half", "half");
-        fs::remove_file(root.join("lib/arm64-v8a/libtest.so")).unwrap();
-        let list = scan(&d).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].kind, Kind::Native);
-        assert!(!list[0].usable);
-        assert!(list[0].reason.contains("missing"), "{}", list[0].reason);
+    fn a_broken_nmod_is_listed_with_its_reason() {
+        let d = tmp("broken");
+        let mut bytes = nmod_bytes("x");
+        // Truncate the central directory so the zip cannot be parsed.
+        bytes.truncate(bytes.len() / 2);
+        fs::write(d.join("broken.nmod"), &bytes).unwrap();
+        // It no longer looks like an nmod at all, so it is skipped rather than
+        // shown as a broken mod: a half-downloaded file has no manifest to read.
+        assert!(scan(&d).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_zip_without_a_manifest_is_not_a_mod() {
+        let d = tmp("plainzip");
+        fs::write(
+            d.join("pack.zip"),
+            crate::tests_support::zip_stored(&[("pack.mcmeta", b"{}".to_vec())]),
+        )
+        .unwrap();
+        assert!(scan(&d).unwrap().is_empty());
     }
 
     #[test]
@@ -301,7 +369,6 @@ mod tests {
     fn unrelated_files_are_ignored() {
         let d = tmp("ignore");
         fs::write(d.join("readme.txt"), b"hello").unwrap();
-        fs::write(d.join("pack.zip"), b"PK\x03\x04").unwrap();
         fs::create_dir_all(d.join("plain-dir")).unwrap();
         assert!(scan(&d).unwrap().is_empty());
     }
