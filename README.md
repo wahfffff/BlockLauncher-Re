@@ -42,7 +42,7 @@ rather than the roadmap restated as if it were done.
 | Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 80 cases on a host machine. The format readers are tested
+`cargo test` runs 81 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 

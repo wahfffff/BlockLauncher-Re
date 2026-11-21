@@ -270,9 +270,10 @@ fn touching_the_java_bridge_explains_what_is_missing() {
 
 /// Rhino can subclass a Java class in place; ECMAScript cannot, and the engine's
 /// own complaint (`expected one of ',' or ')', got '{'`) names the punctuation
-/// instead of the feature.
+/// instead of the feature. The message is replaced, not the verdict: the script
+/// still counts as failed.
 #[test]
-fn a_java_adapter_is_refused_by_name() {
+fn a_java_adapter_is_explained_rather_than_reported_as_punctuation() {
     let script = r#"
         var d = new android.app.AlertDialog.Builder(ctx).setView(sv)
             .setNegativeButton("ok", new android.content.DialogInterface.OnClickListener() {
@@ -280,13 +281,23 @@ fn a_java_adapter_is_refused_by_name() {
             });
     "#;
 
-    match run(script, Box::new(Recording::default())) {
-        Err(Error::BadScript(msg)) => {
-            assert!(msg.contains("subclasses a Java class"), "{msg}");
-            assert!(msg.contains("Rhino"), "{msg}");
-        }
-        other => panic!("expected BadScript, got {:?}", other.map(|r| r.messages)),
-    }
+    let report = run(script, Box::new(Recording::default())).unwrap();
+    assert_eq!(report.failed, 1);
+
+    let message = report.messages.join(" ");
+    assert!(message.contains("subclasses a Java class"), "{message}");
+    assert!(message.contains("Rhino"), "{message}");
+    assert!(!message.contains("expected one of"), "{message}");
+}
+
+/// The detector only ever rewrites the wording of a failure the engine already
+/// reported, so text that merely looks like a JavaAdapter cannot cost a working
+/// script anything.
+#[test]
+fn javascript_that_mentions_a_java_adapter_still_runs() {
+    let script = r#"var s = "new a.b(){}"; if (s.length === 0) { throw new Error("no"); }"#;
+    let report = run(script, Box::new(Recording::default())).unwrap();
+    assert_eq!(report.failed, 0, "{:?}", report.messages);
 }
 
 /// The detector must not fire on ordinary JavaScript, including a call whose

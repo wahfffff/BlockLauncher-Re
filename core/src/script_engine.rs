@@ -252,9 +252,11 @@ const PRELUDE: &str = r#"
 /// `expected one of ',' or ')', got '{'`, which points at the symptom rather than
 /// the cause.
 ///
-/// This cannot misfire on valid JavaScript: `new Foo() {` is a syntax error in
-/// every version of the language, so a match is a JavaAdapter or a broken file,
-/// and both deserve the same explanation.
+/// Only consulted after the engine has already refused the source, which is what
+/// makes a grep-quality detector acceptable here: it cannot reject anything, it
+/// can only improve the wording of a failure that has happened. A string literal
+/// that happens to contain `new a.b(){}` therefore costs nothing — that script
+/// parsed, and this is never asked about it.
 fn looks_like_java_adapter(source: &str) -> bool {
     let bytes = source.as_bytes();
     let mut i = 0;
@@ -349,14 +351,6 @@ fn apply(ctx: &mut Context, limits: Limits) {
 /// Run one script against `host` under `limits`, then call `newLevel` if the
 /// script defined it.
 pub fn run_with(source: &str, host: Box<dyn Host>, limits: Limits) -> crate::Result<Report> {
-    if looks_like_java_adapter(source) {
-        return Err(Error::BadScript(
-            "this script subclasses a Java class in place (`new java.…(){ … }`), which is a \
-             BlockLauncher/Rhino extension; this launcher does not implement the Java bridge yet"
-                .into(),
-        ));
-    }
-
     let _guard = enter(host);
     let mut ctx = Context::default();
     apply(&mut ctx, limits);
@@ -377,6 +371,12 @@ pub fn run_with(source: &str, host: Box<dyn Host>, limits: Limits) -> crate::Res
                     report.halted = true;
                     report.messages.push(budget_message("loading the script", kind, &limits));
                 }
+                None if looks_like_java_adapter(source) => report.messages.push(
+                    "this script subclasses a Java class in place (`new java.…(){ … }`), which is \
+                     a BlockLauncher/Rhino extension; this launcher does not implement the Java \
+                     bridge yet"
+                        .into(),
+                ),
                 None => report.messages.push(raw),
             }
             // A script that failed to parse, or was cut off part way, cannot have
