@@ -11,6 +11,20 @@ from scratch in Rust (core) and Kotlin + Jetpack Compose Material 3 (UI).
 
 ---
 
+## Download
+
+[Releases](https://github.com/wahfffff/BlockLauncher-Re/releases) hold
+`BlockLauncher-Re-<version>-debug.apk` and a `SHA256SUMS` file. No login and no
+zip wrapper — the APK is the asset.
+
+Two caveats that come with a debug build:
+
+* It is signed with a debug key, so installing it needs "install unknown apps"
+  enabled for whatever app you use to open it.
+* `v0.1.0` was built before the signing key was pinned, so installing a later
+  build over it fails with "app not installed". Uninstall it once; builds after
+  that share one key and update in place.
+
 ## Status
 
 This is being built in milestones, and the table below is the truth about it

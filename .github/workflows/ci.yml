@@ -129,9 +129,27 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      # `assembleDebug` signs with ~/.android/debug.keystore, and Gradle creates
+      # that file with a freshly generated random key whenever it is missing. On
+      # a fresh runner that happens on every single build, which means every APK
+      # is signed by a different key — and Android refuses to install one over an
+      # app signed by another. Caching the file is what makes an update possible
+      # instead of "app not installed, uninstall first".
+      - name: Cache the debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Assemble the APK
         working-directory: android
         run: gradle --no-daemon assembleDebug
+
+      - name: Show the signing certificate
+        run: |
+          set -e
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          keytool -printcert -jarfile "$apk" | grep -E 'Owner|SHA256:' | head -2
 
       # "The build passed" is not the same claim as "the APK can start". The
       # first APK this project produced was green and empty, so the artifact is

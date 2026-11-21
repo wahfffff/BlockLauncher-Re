@@ -10,6 +10,18 @@
 
 ---
 
+## 下载
+
+[Releases](https://github.com/wahfffff/BlockLauncher-Re/releases) 里有
+`BlockLauncher-Re-<版本>-debug.apk` 和 `SHA256SUMS`。不需要登录，也没有外层 zip——
+附件本身就是 APK。
+
+debug 构建有两个前提：
+
+* 它用 debug key 签名，安装前要给「打开它的那个应用」开「安装未知应用」。
+* `v0.1.0` 是在签名密钥固定之前构建的，所以把之后的版本直接装到它上面会报
+  「应用未安装」。卸载一次即可，之后的构建共用同一个 key，可以覆盖升级。
+
 ## 当前状态
 
 分里程碑推进。下面这张表是**实际进度**，不是把路线图当成已完成来写。
