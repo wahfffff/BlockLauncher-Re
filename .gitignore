@@ -19,5 +19,10 @@ Cargo.lock.orig
 *.keystore
 *.jks
 
+# The debug signing key CI creates and caches. Never committed: it is the
+# identity that lets one build install over the previous one, and a key in the
+# repository would be a key anyone could sign with.
+/android/.keystore/
+
 # Host scratch
 /scratch/

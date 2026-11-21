@@ -36,6 +36,27 @@ android {
         }
     }
 
+    // A signing key whose location *this project* decides, instead of AGP's
+    // default `~/.android/debug.keystore`.
+    //
+    // That default is regenerated with a random key whenever it is missing, and
+    // on a CI runner it was missing every time - so every build was signed by a
+    // different identity and Android refused to install one over the other
+    // ("app not installed"). CI caches this directory and creates the key on a
+    // miss, which makes the identity stable. Locally, with no key present, the
+    // build falls back to AGP's default so a fresh clone still works.
+    signingConfigs {
+        getByName("debug") {
+            val key = rootProject.file(".keystore/debug.keystore")
+            if (key.exists()) {
+                storeFile = key
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

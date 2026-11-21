@@ -129,17 +129,35 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # `assembleDebug` signs with ~/.android/debug.keystore, and Gradle creates
-      # that file with a freshly generated random key whenever it is missing. On
-      # a fresh runner that happens on every single build, which means every APK
-      # is signed by a different key — and Android refuses to install one over an
-      # app signed by another. Caching the file is what makes an update possible
-      # instead of "app not installed, uninstall first".
-      - name: Cache the debug keystore
+      # `assembleDebug` signs with a key Gradle generates on the spot when it
+      # cannot find one, which on a fresh runner is every single build: a new
+      # random key each time means a new signing identity each time, and Android
+      # refuses to install an APK over an app signed by a different key. Caching
+      # a key at a path this project controls is what makes an update possible.
+      #
+      # The path is `android/.keystore`, not AGP's `~/.android/debug.keystore`:
+      # an earlier attempt cached the latter and the save was skipped with
+      # "Path(s) ... do(es) not exist" - AGP had put the key somewhere else.
+      - name: Cache the signing key
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
+          path: android/.keystore
+          key: blre-debug-keystore-v1
+
+      - name: Create the signing key if the cache missed
+        run: |
+          set -e
+          if [ ! -f android/.keystore/debug.keystore ]; then
+            mkdir -p android/.keystore
+            keytool -genkeypair \
+              -keystore android/.keystore/debug.keystore \
+              -storetype PKCS12 \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          ls -l android/.keystore
 
       - name: Assemble the APK
         working-directory: android
