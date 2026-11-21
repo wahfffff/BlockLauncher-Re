@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Compose draws everything the user sees; this theme only decides what the
+      window looks like for the one frame between launch and setContent. It has
+      no action bar because Compose owns the app bar, and it is derived from the
+      platform Material theme so no AppCompat dependency is pulled in.
+    -->
+    <style name="Theme.Blre" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

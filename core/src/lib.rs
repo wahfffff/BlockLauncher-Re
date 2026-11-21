@@ -15,8 +15,10 @@
 
 pub mod apk;
 pub mod axml;
+pub mod bridge;
 pub mod catalog;
 pub mod error;
+pub mod jni_glue;
 pub mod launch;
 pub mod nmod;
 pub mod version;

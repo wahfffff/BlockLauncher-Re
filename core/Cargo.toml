@@ -19,5 +19,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 
+# Only the Android library needs the JNI types; the host build (tests, the
+# `inspect` example) must stay buildable with nothing but rustc, which is what
+# lets the interesting code be tested off-device.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 [features]
 default = []

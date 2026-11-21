@@ -4,10 +4,16 @@
 Cargo.lock.orig
 
 # Android / Gradle
-/app/build/
-/build/
-.gradle/
-local.properties
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/.kotlin/
+/android/local.properties
+
+# Built by `cargo ndk` in CI and copied into the APK; never committed, because a
+# stale .so in the tree is indistinguishable from a fresh one.
+/android/app/src/main/jniLibs/
+
 *.apk
 *.aab
 *.keystore

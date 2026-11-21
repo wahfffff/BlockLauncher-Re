@@ -27,13 +27,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('core/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # --locked is deliberate: it fails when Cargo.lock does not match
+      # Cargo.toml, which is exactly what happens when a dependency is added for
+      # one target and the lock is not regenerated. Better here than on a device.
       - name: Test
         working-directory: core
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
 
       - name: Build release
         working-directory: core
-        run: cargo build --release
+        run: cargo build --release --locked
 
       # The example exists so the binary readers can be pointed at a real APK by
       # hand; here it only has to run and reject a non-APK cleanly.
@@ -49,3 +52,112 @@ jobs:
             exit 1
           fi
           echo "ok - rejected with exit $code"
+
+  android:
+    name: android (apk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # The runner image ships the SDK here. Pointing at it explicitly beats
+      # letting a setup action discover it, because the action also insists on
+      # installing the legacy `tools` package, which no longer exists and aborts
+      # the whole run before anything is built.
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install SDK packages
+        run: |
+          set -e
+          sdkm="$(command -v sdkmanager || true)"
+          if [ -z "$sdkm" ]; then
+            sdkm="$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -name sdkmanager -type f | sort | tail -n 1)"
+          fi
+          echo "sdkmanager: $sdkm"
+          yes | "$sdkm" --licenses > /dev/null || true
+          "$sdkm" --install "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          echo "--- installed NDK ---"
+          ls "$ANDROID_HOME/ndk"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-android-
+
+      # cargo-ndk is the only thing that knows where the NDK keeps its linkers
+      # for each ABI; without it every target needs three env vars set by hand.
+      - name: Install cargo-ndk
+        run: command -v cargo-ndk > /dev/null || cargo install cargo-ndk --locked
+
+      # Builds libblre_core.so into the packaging directory the APK reads from, so
+      # the Gradle step that follows has nothing to copy or discover.
+      #
+      # Run from `core/`: cargo-ndk shells out to `cargo metadata` before it
+      # applies any --manifest-path, so from the repository root it fails with
+      # "could not find Cargo.toml" before a single file is compiled.
+      - name: Build the Rust core for Android
+        working-directory: core
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          cargo ndk \
+            --platform 23 \
+            -t arm64-v8a \
+            -t armeabi-v7a \
+            -o ../android/app/src/main/jniLibs \
+            build --release --locked
+
+          echo "--- jniLibs ---"
+          find ../android/app/src/main/jniLibs -name '*.so' -exec ls -l {} \;
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Assemble the APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      # "The build passed" is not the same claim as "the APK can start". The
+      # first APK this project produced was green and empty, so the artifact is
+      # inspected rather than trusted.
+      - name: Verify the APK carries the core
+        run: |
+          set -e
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$apk"
+          ls -l "$apk"
+
+          for abi in arm64-v8a armeabi-v7a; do
+            if ! unzip -l "$apk" | grep -q "lib/$abi/libblre_core.so"; then
+              echo "APK is missing lib/$abi/libblre_core.so - it would install and then fail at System.loadLibrary" >&2
+              unzip -l "$apk" | head -40 >&2
+              exit 1
+            fi
+            echo "ok - lib/$abi/libblre_core.so is packaged"
+          done
+
+          # The launcher's own classes have to be in there too; an APK with the
+          # native library but no dex would also install and then do nothing.
+          unzip -l "$apk" | grep -q 'classes.dex' || { echo "no classes.dex" >&2; exit 1; }
+          echo "ok - classes.dex present"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BlockLauncher-Re-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
