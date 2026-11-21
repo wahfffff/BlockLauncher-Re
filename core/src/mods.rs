@@ -152,6 +152,12 @@ fn read_nmod(path: &Path, file_name: String, len: u64) -> Option<Entry> {
             format!("{len} bytes is larger than the {MAX_NMOD_BYTES} byte limit"),
         ));
     }
+    // Decided from the central directory alone: a mods folder can hold a 200 MB
+    // texture pack, and "is this an nmod" must not cost 200 MB of RAM.
+    if !crate::apk::file_has_entry(path, nmod::MANIFEST) {
+        return None;
+    }
+
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -164,12 +170,8 @@ fn read_nmod(path: &Path, file_name: String, len: u64) -> Option<Entry> {
         }
     };
 
-    // Not an nmod is not a broken nmod: skip silently so a folder holding both
-    // mods and texture packs lists only the mods.
-    if !looks_like_nmod(&bytes) {
-        return None;
-    }
-
+    // (The manifest check already ran on the file, so anything reaching here is
+    // a zip that claims to be an nmod; failing to parse it is worth reporting.)
     Some(match nmod::Package::open(bytes) {
         Ok(p) => {
             let supports = p.support_names();
@@ -195,18 +197,6 @@ fn read_nmod(path: &Path, file_name: String, len: u64) -> Option<Entry> {
         }
         Err(e) => Entry::unusable(Kind::Nmod, file_name.clone(), path, e.to_string()),
     })
-}
-
-/// Cheap pre-check: does the zip contain `nmod_manifest.json`?
-///
-/// Reads only the central directory (the whole buffer is already in memory), so
-/// this costs nothing beyond the parse that `Package::open` would do anyway and
-/// keeps a plain `.zip` from being reported as a broken mod.
-fn looks_like_nmod(bytes: &[u8]) -> bool {
-    match crate::apk::Apk::open(bytes) {
-        Ok(zip) => zip.entry(nmod::MANIFEST).is_some(),
-        Err(_) => false,
-    }
 }
 
 fn read_legacy(path: &Path, file_name: String, len: u64) -> Entry {

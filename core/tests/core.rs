@@ -739,3 +739,23 @@ fn plan_is_deterministic_regardless_of_mod_order() {
         ]
     );
 }
+
+#[test]
+fn a_zip_on_disk_is_checked_from_its_central_directory() {
+    let dir = TempDir::new("has-entry");
+    let p = dir.path().join("a.zip");
+    std::fs::write(
+        &p,
+        zip_stored(&[("nmod_manifest.json", b"{}".to_vec())]),
+    )
+    .unwrap();
+    assert!(apk::file_has_entry(&p, "nmod_manifest.json"));
+    assert!(!apk::file_has_entry(&p, "something-else.json"));
+
+    // A missing file and a file that is not a zip both answer "no" rather than
+    // erroring: the caller is asking whether it should handle this file.
+    assert!(!apk::file_has_entry(&dir.path().join("nope.zip"), "nmod_manifest.json"));
+    let junk = dir.path().join("junk.zip");
+    std::fs::write(&junk, b"not a zip at all").unwrap();
+    assert!(!apk::file_has_entry(&junk, "nmod_manifest.json"));
+}

@@ -87,41 +87,7 @@ impl<'a> Apk<'a> {
             )));
         }
 
-        let mut entries = Vec::with_capacity((total as usize).min(4096));
-        let mut p = cd_offset as usize;
-        for _ in 0..total {
-            if u32le(buf, p) != Some(SIG_CENTRAL) {
-                return Err(Error::NotZip(format!(
-                    "central directory entry at {p} has no signature"
-                )));
-            }
-            let method = u16le(buf, p + 10).unwrap_or(0);
-            let csize = u32le(buf, p + 20).unwrap_or(0);
-            let usize_ = u32le(buf, p + 24).unwrap_or(0);
-            let name_len = u16le(buf, p + 28).unwrap_or(0) as usize;
-            let extra_len = u16le(buf, p + 30).unwrap_or(0) as usize;
-            let comment_len = u16le(buf, p + 32).unwrap_or(0) as usize;
-            let local_offset = u32le(buf, p + 42).unwrap_or(0);
-
-            let name_bytes = buf
-                .get(p + 46..p + 46 + name_len)
-                .ok_or_else(|| Error::NotZip("entry name runs past the file".into()))?;
-            let name = String::from_utf8_lossy(name_bytes).into_owned();
-
-            entries.push(Entry {
-                name,
-                method,
-                compressed_size: csize,
-                uncompressed_size: usize_,
-                local_offset,
-            });
-
-            p += 46 + name_len + extra_len + comment_len;
-            if p > cd_end {
-                break;
-            }
-        }
-        Ok(entries)
+        parse_central(&buf[cd_offset as usize..cd_end], total as u16)
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -234,4 +200,107 @@ pub fn inspect(buf: &[u8]) -> Result<ApkInfo> {
         abis,
         has_manifest: true,
     })
+}
+
+/// Parse a central directory that has already been located.
+///
+/// Split out from [`Apk::open`] so it can run against a slice read from a file
+/// without the whole archive in memory: a mod folder may hold a 200 MB texture
+/// pack, and deciding whether it is an nmod should not cost 200 MB of RAM.
+fn parse_central(cd: &[u8], total: u16) -> Result<Vec<Entry>> {
+    let mut entries = Vec::with_capacity((total as usize).min(4096));
+    let mut p = 0usize;
+    for _ in 0..total {
+        if u32le(cd, p) != Some(SIG_CENTRAL) {
+            return Err(Error::NotZip(format!(
+                "central directory entry at {p} has no signature"
+            )));
+        }
+        let method = u16le(cd, p + 10).unwrap_or(0);
+        let csize = u32le(cd, p + 20).unwrap_or(0);
+        let usize_ = u32le(cd, p + 24).unwrap_or(0);
+        let name_len = u16le(cd, p + 28).unwrap_or(0) as usize;
+        let extra_len = u16le(cd, p + 30).unwrap_or(0) as usize;
+        let comment_len = u16le(cd, p + 32).unwrap_or(0) as usize;
+        let local_offset = u32le(cd, p + 42).unwrap_or(0);
+
+        let name_bytes = cd
+            .get(p + 46..p + 46 + name_len)
+            .ok_or_else(|| Error::NotZip("entry name runs past the central directory".into()))?;
+        let name = String::from_utf8_lossy(name_bytes).into_owned();
+
+        entries.push(Entry {
+            name,
+            method,
+            compressed_size: csize,
+            uncompressed_size: usize_,
+            local_offset,
+        });
+
+        p += 46 + name_len + extra_len + comment_len;
+        if p >= cd.len() {
+            break;
+        }
+    }
+    Ok(entries)
+}
+
+/// Does the zip at `path` contain `want`? Reads the central directory only.
+///
+/// `false` for anything that is not a readable zip, because every caller is
+/// asking "is this the thing I handle", not "prove this file is valid".
+pub fn file_has_entry(path: &std::path::Path, want: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let len = match f.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return false,
+    };
+    if len < 22 {
+        return false;
+    }
+
+    // The end-of-central-directory record sits within the last 22 + 65535 bytes.
+    let tail_len = std::cmp::min(len, 22 + 0xffff);
+    let mut tail = vec![0u8; tail_len as usize];
+    if f.seek(SeekFrom::End(-(tail_len as i64))).is_err() || f.read_exact(&mut tail).is_err() {
+        return false;
+    }
+
+    let mut eocd = None;
+    let mut i = tail.len() - 22;
+    loop {
+        if u32le(&tail, i) == Some(SIG_EOCD) {
+            eocd = Some(i);
+            break;
+        }
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+    let Some(eocd) = eocd else { return false };
+
+    let total = u16le(&tail, eocd + 10).unwrap_or(0);
+    let cd_size = u32le(&tail, eocd + 12).unwrap_or(0) as usize;
+    let cd_offset = u32le(&tail, eocd + 16).unwrap_or(0) as u64;
+    if cd_size == 0 || cd_size > 4 * 1024 * 1024 {
+        // An nmod's central directory is a few dozen entries; a texture pack's
+        // can be tens of thousands. Refusing the huge ones costs nothing,
+        // because a package that big would not have been read anyway.
+        return false;
+    }
+
+    let mut cd = vec![0u8; cd_size];
+    if f.seek(SeekFrom::Start(cd_offset)).is_err() || f.read_exact(&mut cd).is_err() {
+        return false;
+    }
+    match parse_central(&cd, total) {
+        Ok(entries) => entries.iter().any(|e| e.name == want),
+        Err(_) => false,
+    }
 }

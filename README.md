@@ -60,7 +60,7 @@ rather than the roadmap restated as if it were done.
 | Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 125 cases on a host machine. The format readers are tested
+`cargo test` runs 126 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 
@@ -114,7 +114,7 @@ core/                     Rust, no Android dependency
   src/bridge.rs           one JSON request in, one JSON reply out
   src/jni_glue.rs         the single JNI export; empty off-device
   examples/inspect.rs     `cargo run --example inspect -- file.apk`
-  tests/core.rs           23 host-side cases (+102 in src/)
+  tests/core.rs           24 host-side cases (+102 in src/)
 android/                  Kotlin + Compose Material 3
   app/src/main/.../NativeBridge.kt   loadLibrary + the one external function
   app/src/main/.../Core.kt           typed wrapper, every call off the main thread
