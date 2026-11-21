@@ -9,7 +9,7 @@
 //! table in `script.rs`, the docs and the code cannot drift apart.
 
 use crate::error::Error;
-use crate::script::{enter, with_host as host_call, Host, Report, API};
+use crate::script::{enter, with_host as host_call, Host, Limits, Report, API};
 use boa_engine::{
     js_string, object::builtins::JsArray, object::ObjectInitializer, property::Attribute, Context,
     JsError, JsNativeError, JsValue, NativeFunction, Source,
@@ -222,29 +222,84 @@ fn call_hook(ctx: &mut Context, name: &str) -> std::result::Result<bool, JsError
     Ok(true)
 }
 
-/// Run one script against `host`, then call `newLevel` if the script defined it.
+/// Run one script against `host` under the default [`Limits`].
 pub fn run(source: &str, host: Box<dyn Host>) -> crate::Result<Report> {
+    run_with(source, host, Limits::default())
+}
+
+/// Engine wording for a tripped limit. Matched as text because the payload is
+/// not exported; `the_engine_still_words_limits_the_way_we_detect_them` fails if
+/// an upgrade renames either one, so this cannot rot into a silent no-op.
+const LOOP_MARKER: &str = "maximum number of iteration loops";
+const RECURSION_MARKER: &str = "maximum number of recursive calls";
+const STACK_MARKER: &str = "maximum stack size";
+
+/// Which ceiling a message names, if any.
+pub(crate) fn limit_hit(message: &str) -> Option<&'static str> {
+    if message.contains(LOOP_MARKER) {
+        Some("loop")
+    } else if message.contains(RECURSION_MARKER) {
+        Some("recursion")
+    } else if message.contains(STACK_MARKER) {
+        Some("stack")
+    } else {
+        None
+    }
+}
+
+fn budget_message(where_: &str, kind: &str, limits: &Limits) -> String {
+    format!(
+        "{where_}: stopped by the {kind} budget ({}); the script probably never finishes",
+        limits.describe()
+    )
+}
+
+fn apply(ctx: &mut Context, limits: Limits) {
+    let runtime = ctx.runtime_limits_mut();
+    runtime.set_loop_iteration_limit(limits.loop_iterations);
+    runtime.set_recursion_limit(limits.recursion);
+    runtime.set_stack_size_limit(limits.stack_size);
+}
+
+/// Run one script against `host` under `limits`, then call `newLevel` if the
+/// script defined it.
+pub fn run_with(source: &str, host: Box<dyn Host>, limits: Limits) -> crate::Result<Report> {
     let _guard = enter(host);
     let mut ctx = Context::default();
+    apply(&mut ctx, limits);
     install(&mut ctx).map_err(|e| Error::BadScript(format!("cannot build the script globals: {e}")))?;
 
     let mut report = Report::default();
     match ctx.eval(Source::from_bytes(source)) {
         Ok(_) => report.ran += 1,
         Err(e) => {
+            let raw = e.to_string();
             report.failed += 1;
-            report.messages.push(format!("{e}"));
-            // A script that failed to parse cannot have defined hooks; running
-            // them would attribute its errors to the wrong place.
+            match limit_hit(&raw) {
+                Some(kind) => {
+                    report.halted = true;
+                    report.messages.push(budget_message("loading the script", kind, &limits));
+                }
+                None => report.messages.push(raw),
+            }
+            // A script that failed to parse, or was cut off part way, cannot have
+            // defined hooks reliably; running them would attribute its errors to
+            // the wrong place.
             return Ok(report);
         }
     }
 
-    if let Err(e) = call_hook(&mut ctx, "newLevel") {
-        report.messages.push(format!("newLevel: {e}"));
-    }
-    if let Err(e) = call_hook(&mut ctx, "selectLevelHook") {
-        report.messages.push(format!("selectLevelHook: {e}"));
+    for hook in ["newLevel", "selectLevelHook"] {
+        if let Err(e) = call_hook(&mut ctx, hook) {
+            let raw = e.to_string();
+            match limit_hit(&raw) {
+                Some(kind) => {
+                    report.halted = true;
+                    report.messages.push(budget_message(hook, kind, &limits));
+                }
+                None => report.messages.push(format!("{hook}: {raw}")),
+            }
+        }
     }
 
     Ok(report)

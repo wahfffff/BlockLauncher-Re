@@ -75,12 +75,42 @@ and what it changes.
 It also means the script names are decided once. Adding `Level.getBiome` is a
 row in `API`, a match arm in `install`, and a test — not a new special case.
 
+## Execution budget
+
+A script is untrusted input, so it runs under `script::Limits` rather than until
+it decides to stop:
+
+| Ceiling | Default | What it catches |
+|---|---|---|
+| `loop_iterations` | 500 000 per frame | `while (true)`, `do … while`, `for (;;)` |
+| `recursion` | 256 nested calls | a script that recurses instead of looping |
+| `stack_size` | 10 240 value slots | absurdly deep expressions |
+
+The unit is a count, not a wall-clock deadline. A deadline measured in
+milliseconds behaves differently on a fast phone and a slow one, so a script
+could pass on one and fail on another, and the tests would be flaky for a reason
+that has nothing to do with the code. A count is identical everywhere and can be
+asserted exactly.
+
+When a ceiling is passed the engine throws, and the call returns a `Report` with
+`halted: true` and a message naming the budget — not a hang, and not a bare
+"script error" that hides which ceiling was hit.
+
+The defaults come from a measurement: this engine runs about 1.3 million
+iterations of a trivial loop per second in a release build, so 500 000 is a few
+hundred milliseconds of work. No honest mod script comes close; a runaway one is
+cut off well before it matters.
+
 ## Known gaps
 
-* **No instruction budget.** A `while (true)` blocks the calling thread. Scripts
-  therefore run on their own thread, not the UI thread, but there is no deadline
-  and a spinning script is killed with the process. This is the next safety item.
 * **No game binding yet.** Everything above is verified against a fake world.
-  Which `Host` methods the real game can answer is a device question.
-* **No script store in the UI yet.** Import/list is the next commit; the runtime
-  does not depend on it.
+  `script::Host` has no implementation, so on a device every game call returns
+  "no game is attached". Which `Host` methods the real game can answer is a
+  device question, not a build-machine one.
+* **A single non-returning engine call is still uninterruptible.** The budget
+  counts loop iterations and calls; nothing can interrupt the engine inside one
+  operation. That is why scripts run on their own thread rather than the UI
+  thread.
+* **No persisted script store.** The UI checks a script the user picks; it does
+  not keep a list of installed scripts the way builds and texture packs are kept.
+  The runtime does not depend on that.

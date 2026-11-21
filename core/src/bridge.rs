@@ -21,6 +21,9 @@
 
 use crate::catalog::Library;
 use crate::error::Error;
+use crate::pack::PackStore;
+use crate::script::{Limits, NullHost};
+use crate::script_engine;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -117,6 +120,75 @@ fn handle(request: &str) -> std::result::Result<Value, Failure> {
             Ok(json!({ "removed": removed, "count": lib.versions().len() }))
         }
 
+        "packs.list" => {
+            let store = open_packs(&req)?;
+            Ok(json!({
+                "root": store.root().to_string_lossy(),
+                "count": store.packs().len(),
+                "packs": store.packs(),
+            }))
+        }
+
+        "packs.import" => {
+            let path = string_arg(&req, "path")?;
+            let mut store = open_packs(&req)?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| Failure::new("IO", format!("cannot read {path}: {e}")))?;
+            // The filename is a last-resort display name for archives that carry
+            // no manifest; the core decides whether it needs it.
+            let name = req.get("name").and_then(Value::as_str);
+            let out = store.import(&bytes, name).map_err(Failure::from_core)?;
+            let count = store.packs().len();
+            Ok(json!({
+                "deduped": out.deduped,
+                "pack": out.pack,
+                "count": count,
+            }))
+        }
+
+        "packs.remove" => {
+            let id = string_arg(&req, "id")?;
+            let mut store = open_packs(&req)?;
+            let removed = store.remove(&id).map_err(Failure::from_core)?;
+            Ok(json!({ "removed": removed, "count": store.packs().len() }))
+        }
+
+        "packs.enable" => {
+            let id = string_arg(&req, "id")?;
+            let enabled = req
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| Failure::new("BAD_REQUEST", "missing \"enabled\""))?;
+            let mut store = open_packs(&req)?;
+            let pack = store.set_enabled(&id, enabled).map_err(Failure::from_core)?;
+            Ok(json!({ "pack": pack }))
+        }
+
+        // Running a script with no game attached is genuinely useful: it proves
+        // the file parses and that its top-level code does not throw, and every
+        // game call it makes comes back as "no game is attached" rather than
+        // silently succeeding.
+        "scripts.check" => {
+            let source = string_arg(&req, "source")?;
+            let report =
+                script_engine::run_with(&source, Box::new(NullHost::new()), Limits::default())
+                    .map_err(Failure::from_core)?;
+            Ok(json!({
+                "ran": report.ran,
+                "failed": report.failed,
+                "halted": report.halted,
+                "messages": report.messages,
+            }))
+        }
+
+        "scripts.api" => {
+            let globals: Vec<Value> = crate::script::API
+                .iter()
+                .map(|(name, arity)| json!({ "name": name, "arity": arity }))
+                .collect();
+            Ok(json!({ "globals": globals, "hooks": crate::script::HOOKS }))
+        }
+
         other => Err(Failure::new(
             "UNKNOWN_COMMAND",
             format!("unknown command: {other}"),
@@ -134,6 +206,11 @@ fn string_arg(req: &Value, key: &str) -> std::result::Result<String, Failure> {
 fn open(req: &Value) -> std::result::Result<Library, Failure> {
     let root = string_arg(req, "root")?;
     Library::open(Path::new(&root)).map_err(Failure::from_core)
+}
+
+fn open_packs(req: &Value) -> std::result::Result<PackStore, Failure> {
+    let root = string_arg(req, "root")?;
+    PackStore::open(Path::new(&root)).map_err(Failure::from_core)
 }
 
 #[cfg(test)]
@@ -265,5 +342,80 @@ mod tests {
         ] {
             assert!(!dispatch(req).contains('\n'), "reply has a newline: {req}");
         }
+    }
+
+    // ------------------------------------------------------------------ packs
+
+    #[test]
+    fn packs_list_starts_empty() {
+        let t = TempDir::new("packs-empty");
+        let v = parse(&dispatch(&format!(
+            r#"{{"cmd":"packs.list","root":{}}}"#,
+            serde_json::to_string(&t.s()).unwrap()
+        )));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["data"]["count"], 0);
+    }
+
+    #[test]
+    fn a_pack_that_is_not_an_archive_is_named_as_such() {
+        let t = TempDir::new("packs-bad");
+        let file = t.0.join("not-a-pack.zip");
+        std::fs::write(&file, b"this is not a zip").unwrap();
+        let reply = dispatch(&format!(
+            r#"{{"cmd":"packs.import","root":{},"path":{}}}"#,
+            serde_json::to_string(&t.s()).unwrap(),
+            serde_json::to_string(&file.to_string_lossy()).unwrap()
+        ));
+        // A distinguishable code matters here: "not an archive" and "an archive
+        // with no textures" are different mistakes by the person importing.
+        assert_eq!(code(&reply), "NOT_A_ZIP", "{reply}");
+    }
+
+    #[test]
+    fn enabling_a_pack_that_does_not_exist_is_an_error() {
+        let t = TempDir::new("packs-enable");
+        let reply = dispatch(&format!(
+            r#"{{"cmd":"packs.enable","root":{},"id":"nope","enabled":true}}"#,
+            serde_json::to_string(&t.s()).unwrap()
+        ));
+        assert_eq!(parse(&reply)["ok"], false, "{reply}");
+    }
+
+    // ------------------------------------------------------------------ scripts
+
+    #[test]
+    fn scripts_api_publishes_the_same_table_the_runtime_installs() {
+        let v = parse(&dispatch(r#"{"cmd":"scripts.api"}"#));
+        assert_eq!(v["ok"], true);
+        let globals = v["data"]["globals"].as_array().expect("globals array");
+        assert_eq!(globals.len(), crate::script::API.len());
+        let hooks = v["data"]["hooks"].as_array().expect("hooks array");
+        assert_eq!(hooks.len(), crate::script::HOOKS.len());
+    }
+
+    #[test]
+    fn scripts_check_reports_a_syntax_error_without_running_it() {
+        let v = parse(&dispatch(&format!(
+            r#"{{"cmd":"scripts.check","source":{}}}"#,
+            serde_json::to_string("function (").unwrap()
+        )));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["data"]["failed"], 1);
+        assert_eq!(v["data"]["ran"], 0);
+    }
+
+    #[test]
+    fn scripts_check_says_the_game_is_not_attached_rather_than_faking_it() {
+        let v = parse(&dispatch(&format!(
+            r#"{{"cmd":"scripts.check","source":{}}}"#,
+            serde_json::to_string("Level.setTile(0, 0, 0, 1, 0);").unwrap()
+        )));
+        assert_eq!(v["data"]["failed"], 1, "{v}");
+        let messages = v["data"]["messages"].to_string();
+        assert!(
+            messages.contains("no game is attached"),
+            "the message should say why: {messages}"
+        );
     }
 }

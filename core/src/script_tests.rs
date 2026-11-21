@@ -167,3 +167,82 @@ fn a_script_with_no_hooks_still_reports_success() {
     assert_eq!(report.failed, 0);
     assert_eq!(report.ran, 1);
 }
+
+// ------------------------------------------------------------ execution budget
+
+#[test]
+fn an_endless_loop_is_stopped_rather_than_waited_on() {
+    let report = run_with("while (true) {}", Box::new(Recording::default()), Limits::tiny())
+        .expect("a halted script is still a report");
+    assert!(report.halted, "{:?}", report.messages);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.ran, 0);
+    assert!(
+        report.messages.iter().any(|m| m.contains("loop budget")),
+        "{:?}",
+        report.messages
+    );
+}
+
+#[test]
+fn an_endless_loop_inside_a_hook_is_stopped_too() {
+    // The budget applies to hook calls, not only to the top-level script: a mod
+    // whose `newLevel` spins is the likelier shape of this bug.
+    let script = "function newLevel() { while (true) {} }";
+    let report = run_with(script, Box::new(Recording::default()), Limits::tiny()).unwrap();
+    assert!(report.halted, "{:?}", report.messages);
+    assert!(
+        report
+            .messages
+            .iter()
+            .any(|m| m.contains("newLevel") && m.contains("loop budget")),
+        "{:?}",
+        report.messages
+    );
+}
+
+#[test]
+fn runaway_recursion_hits_the_recursion_ceiling() {
+    let script = "function f(n) { return f(n + 1); } f(0);";
+    let report = run_with(script, Box::new(Recording::default()), Limits::tiny()).unwrap();
+    assert!(report.halted, "{:?}", report.messages);
+    assert!(
+        report.messages.iter().any(|m| m.contains("recursion budget")),
+        "{:?}",
+        report.messages
+    );
+}
+
+#[test]
+fn a_normal_script_fits_inside_the_default_budget() {
+    // The default must not stop honest work: a thousand iterations is already
+    // more looping than a mod tick does.
+    let script = "var s = 0; for (var i = 0; i < 1000; i++) { s += i; } \
+                  if (s !== 499500) throw new Error('bad sum: ' + s);";
+    let report = run(script, Box::new(Recording::default())).unwrap();
+    assert_eq!(report.failed, 0, "{:?}", report.messages);
+    assert!(!report.halted, "{:?}", report.messages);
+}
+
+#[test]
+fn the_engine_still_words_limits_the_way_we_detect_them() {
+    // Detection is textual because the engine does not export the limit payload.
+    // That is only safe while this test passes; an upgrade that renames the
+    // message turns "stopped by the loop budget" into "unknown error", which is
+    // still reported, but this test is what makes that deliberate rather than a
+    // surprise.
+    let mut ctx = Context::default();
+    install(&mut ctx).expect("globals install");
+    ctx.runtime_limits_mut().set_loop_iteration_limit(500);
+    let e = ctx.eval(Source::from_bytes(b"while (true) {}")).expect_err("must trip");
+    let text = e.to_string();
+    assert_eq!(limit_hit(&text), Some("loop"), "engine wording changed: {text}");
+
+    let mut ctx = Context::default();
+    ctx.runtime_limits_mut().set_recursion_limit(16);
+    let e = ctx
+        .eval(Source::from_bytes(b"function f() { return f(); } f();"))
+        .expect_err("must trip");
+    let text = e.to_string();
+    assert_eq!(limit_hit(&text), Some("recursion"), "engine wording changed: {text}");
+}

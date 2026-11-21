@@ -35,6 +35,48 @@ data class GameBuild(
 data class ImportResult(val build: GameBuild, val deduped: Boolean)
 
 /**
+ * One texture pack, mirroring `core::pack::Pack`.
+ *
+ * `textures` is the count the core found inside the archive, not an estimate:
+ * it is what makes "this pack is empty" visible before the game refuses it.
+ */
+data class TexturePack(
+    val id: String,
+    val name: String,
+    val version: String,
+    val description: String,
+    val size: Long,
+    val textures: Int,
+    val enabled: Boolean,
+) {
+    val displayName: String
+        get() = name.takeIf { it.isNotBlank() } ?: "未命名材质包"
+}
+
+data class PackImportResult(val pack: TexturePack, val deduped: Boolean)
+
+/**
+ * What running a script produced.
+ *
+ * `halted` is separate from `failed` on purpose: a script stopped by the
+ * execution budget did not have a bug in the usual sense, it ran too long, and
+ * saying "stopped" instead of "failed" is the difference between a user
+ * deleting the mod and a user looking at its loop.
+ */
+data class ScriptReport(
+    val ran: Int,
+    val failed: Int,
+    val halted: Boolean,
+    val messages: List<String>,
+)
+
+/** One callable the script runtime provides. */
+data class ScriptGlobal(val name: String, val arity: Int)
+
+/** The script surface, as the runtime itself publishes it. */
+data class ScriptApi(val globals: List<ScriptGlobal>, val hooks: List<String>)
+
+/**
  * Typed wrapper over the bridge.
  *
  * Every method runs on [Dispatchers.IO]: the core reads and hashes a whole APK
@@ -123,5 +165,88 @@ object Core {
                 .toString()
         )
         parseBuild(data.getJSONObject("removed"))
+    }
+
+    // ------------------------------------------------------------------ packs
+
+    private fun parsePack(o: JSONObject): TexturePack = TexturePack(
+        id = o.getString("id"),
+        name = o.optString("name"),
+        version = o.optString("version"),
+        description = o.optString("description"),
+        size = o.optLong("size"),
+        textures = o.optInt("textures"),
+        enabled = o.optBoolean("enabled", false),
+    )
+
+    suspend fun packs(root: String): List<TexturePack> = withContext(Dispatchers.IO) {
+        val data = call(JSONObject().put("cmd", "packs.list").put("root", root).toString())
+        val arr = data.optJSONArray("packs") ?: return@withContext emptyList()
+        (0 until arr.length()).map { parsePack(arr.getJSONObject(it)) }
+    }
+
+    suspend fun importPack(root: String, path: String, name: String?): PackImportResult =
+        withContext(Dispatchers.IO) {
+            val req = JSONObject()
+                .put("cmd", "packs.import")
+                .put("root", root)
+                .put("path", path)
+            if (name != null) req.put("name", name)
+            val data = call(req.toString())
+            PackImportResult(
+                pack = parsePack(data.getJSONObject("pack")),
+                deduped = data.optBoolean("deduped", false),
+            )
+        }
+
+    suspend fun removePack(root: String, id: String): Boolean = withContext(Dispatchers.IO) {
+        val data = call(
+            JSONObject().put("cmd", "packs.remove").put("root", root).put("id", id).toString()
+        )
+        data.optBoolean("removed", false)
+    }
+
+    suspend fun setPackEnabled(root: String, id: String, enabled: Boolean): TexturePack =
+        withContext(Dispatchers.IO) {
+            val data = call(
+                JSONObject()
+                    .put("cmd", "packs.enable")
+                    .put("root", root)
+                    .put("id", id)
+                    .put("enabled", enabled)
+                    .toString()
+            )
+            parsePack(data.getJSONObject("pack"))
+        }
+
+    // ---------------------------------------------------------------- scripts
+
+    suspend fun scriptApi(): ScriptApi = withContext(Dispatchers.IO) {
+        val data = call("""{"cmd":"scripts.api"}""")
+        val globals = data.optJSONArray("globals")?.let { arr ->
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                ScriptGlobal(o.optString("name"), o.optInt("arity"))
+            }
+        } ?: emptyList()
+        val hooks = data.optJSONArray("hooks")?.let { arr ->
+            (0 until arr.length()).map { arr.getString(it) }
+        } ?: emptyList()
+        ScriptApi(globals, hooks)
+    }
+
+    suspend fun checkScript(source: String): ScriptReport = withContext(Dispatchers.IO) {
+        val data = call(
+            JSONObject().put("cmd", "scripts.check").put("source", source).toString()
+        )
+        val messages = data.optJSONArray("messages")?.let { arr ->
+            (0 until arr.length()).map { arr.getString(it) }
+        } ?: emptyList()
+        ScriptReport(
+            ran = data.optInt("ran"),
+            failed = data.optInt("failed"),
+            halted = data.optBoolean("halted", false),
+            messages = messages,
+        )
     }
 }

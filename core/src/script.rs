@@ -18,13 +18,23 @@
 //!   They throw. A script that half-works is worse to debug than one that says
 //!   "this launcher cannot answer that yet".
 //!
-//! ## What is not here
+//! ## Bounded execution
 //!
-//! There is no instruction budget: a `while (true)` in a script blocks the
-//! calling thread. That is not an oversight — it is why scripts run on the
-//! launcher's script thread and not the UI thread — but there is no deadline
-//! enforcement yet, and a script that spins will be killed with the process
-//! rather than caught. Saying so beats pretending.
+//! A script is untrusted input — it arrives as a file the user picked — so it
+//! runs under a budget ([`Limits`]) rather than until it feels like stopping.
+//! The engine counts loop iterations and recursive calls and throws when either
+//! ceiling is passed; the call comes back as a [`Report`] with `halted` set
+//! instead of spinning until the process is killed.
+//!
+//! The budget is a count, not a wall-clock deadline. That is deliberate: a
+//! deadline measured in milliseconds behaves differently on a fast phone and a
+//! slow one, so a script could pass here and fail on a device, and the tests
+//! would be flaky for a reason that has nothing to do with the code. A count is
+//! the same everywhere and can be asserted exactly.
+//!
+//! What a count cannot catch is a single operation that never returns inside the
+//! engine itself. Nothing in this launcher can interrupt that, which is the
+//! remaining reason scripts run on their own thread rather than the UI thread.
 
 use std::cell::RefCell;
 
@@ -134,11 +144,57 @@ pub const API: &[(&str, usize)] = &[
 /// Names a script may define and the launcher will call.
 pub const HOOKS: &[&str] = &["newLevel", "modTick", "chatHook", "selectLevelHook"];
 
+/// How much work a script may do before the engine stops it.
+///
+/// The defaults are chosen from a measurement, not a guess: this engine runs
+/// about 1.3 million iterations of a trivial loop per second in a release
+/// build, so the loop budget is a few hundred milliseconds of work — long
+/// enough that no honest mod script notices it, short enough that a runaway one
+/// is cut off rather than freezing its thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Loop iterations a single frame may run before the engine throws.
+    pub loop_iterations: u64,
+    /// Nested calls before the engine throws. Catches a script that recurses
+    /// instead of looping, which the loop counter would never see.
+    pub recursion: usize,
+    /// Engine value-stack entries. Small numbers of deep expressions trip this.
+    pub stack_size: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            loop_iterations: 500_000,
+            recursion: 256,
+            stack_size: 10 * 1024,
+        }
+    }
+}
+
+impl Limits {
+    /// A budget small enough to hit in a test without waiting for it.
+    pub fn tiny() -> Self {
+        Limits { loop_iterations: 1_000, recursion: 32, stack_size: 1024 }
+    }
+
+    /// One sentence naming the numbers, for an error the user reads.
+    pub fn describe(&self) -> String {
+        format!(
+            "loop_iterations={}, recursion={}",
+            self.loop_iterations, self.recursion
+        )
+    }
+}
+
 /// A loaded script and the errors it produced.
 #[derive(Debug, Default)]
 pub struct Report {
     pub ran: usize,
     pub failed: usize,
+    /// True when a [`Limits`] ceiling stopped the script instead of the script
+    /// finishing. The UI uses this to say "stopped" rather than "failed".
+    pub halted: bool,
     pub messages: Vec<String>,
 }
 

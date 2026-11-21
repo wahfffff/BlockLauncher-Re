@@ -34,22 +34,35 @@ rather than the roadmap restated as if it were done.
 |---|---|---|
 | APK inspection (binary `AndroidManifest.xml`, ABI list) | **done** | `cargo test`, plus a real 30 MB APK |
 | Version library (content-addressed import, dedupe, remove) | **done** | `cargo test` |
+| Texture packs (import, real texture count, enable/disable) | **done** | `cargo test` |
+| ModPE script runtime (globals, hooks, bounded execution) | **done off-device** | `cargo test`; the game side is not attached yet |
 | Native mod (`.nmod`) manifest validation | **done** | `cargo test` |
 | Launch planning (ABI choice, mod filtering, ordering) | **done** | `cargo test` |
 | JNI bridge | **done** | `cargo test` for the bridge; the symbol name is checked by the APK build |
-| Android UI (Compose Material 3) | **library screen only** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
+| Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 33 cases on a host machine. The format readers are tested
+`cargo test` runs 70 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 
 ### What the APK does today
 
-Import a game APK you already have, see it in the library with its package,
-version, ABIs and SHA-256, and delete it again. That is all. It does not start
-the game yet — an imported build is a file in a list, nothing more, and the
-launch button arrives with M3.
+Three lists, each backed by its own store: imported game builds, imported texture
+packs, and a script checker.
+
+- **Builds** — import a game APK you already have, see its package, version, ABIs
+  and SHA-256, delete it. It does not start the game yet; an imported build is a
+  file in a list, and the launch button arrives with M3.
+- **Texture packs** — import a `.zip`, see how many texture files it actually
+  contains, enable or disable it, delete it. An archive with a manifest but no
+  textures is rejected at import, which is the moment the user can still do
+  something about it.
+- **Scripts** — pick a ModPE `.js` and have the real runtime load it. The report
+  says whether it parsed, what its top-level code did, and every game call it
+  made comes back as "no game is attached" rather than silently succeeding. A
+  script with `while (true)` is stopped by an execution budget instead of hanging
+  the process.
 
 ## What this launcher will not do
 
@@ -72,16 +85,19 @@ core/                     Rust, no Android dependency
   src/apk.rs              minimal ZIP reader + APK inspection
   src/version.rs          Minecraft version ordering (not semver)
   src/catalog.rs          the on-disk version library
+  src/pack.rs             texture packs: import, texture count, enable/disable
+  src/script.rs           the ModPE contract: Host trait, API table, Limits
+  src/script_engine.rs    those globals bound to a JavaScript engine (Boa)
   src/nmod.rs             native mod manifests and validation
   src/launch.rs           pure planning: build + device + mods -> plan
   src/bridge.rs           one JSON request in, one JSON reply out
   src/jni_glue.rs         the single JNI export; empty off-device
   examples/inspect.rs     `cargo run --example inspect -- file.apk`
-  tests/core.rs           24 host-side cases (+9 in src/bridge.rs)
+  tests/core.rs           24 host-side cases (+46 in src/)
 android/                  Kotlin + Compose Material 3
   app/src/main/.../NativeBridge.kt   loadLibrary + the one external function
   app/src/main/.../Core.kt           typed wrapper, every call off the main thread
-  app/src/main/.../MainActivity.kt   the library screen
+  app/src/main/.../MainActivity.kt   three lists: builds, packs, script check
 ```
 
 The split exists so the decisions can be tested without a phone. Everything the
@@ -173,13 +189,19 @@ The APK is a debug build, signed with the debug key. Installing it needs
 |---|---|---|
 | M1 | Core: APK inspection, library, native-mod validation, planning | `cargo test` — **done** |
 | M2 | Compose Material 3 shell + JNI bridge | CI produces an installable APK — **done**; on-device look still unreviewed |
+| M2.5 | Texture packs and the ModPE script runtime | `cargo test` — **done off-device**; the game side is a trait with no implementation yet |
 | M3 | Launching an imported build in an isolated data directory | Real-device report |
-| M4 | Injecting native mods into the game process | Real-device report |
+| M4 | Attaching the script runtime to the running game, then injecting native mods | Real-device report |
 
 M3 and M4 cannot be verified on a build machine; they need a device and a real
 game build, and until that happens they are described here as unverified rather
 than announced as working. The same caution applies to the M2 UI: it compiles and
 the APK is inspected, but no one has yet seen it draw a screen.
+
+M2.5 has one honest caveat of its own: the runtime is complete and tested, but
+`script::Host` — the trait that turns `Level.setTile` into a call on a live
+world — has no implementation, because there is no attached game to implement it
+against. Every such call reports that instead of pretending.
 
 ## Licence
 
