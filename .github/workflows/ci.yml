@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -161,3 +162,79 @@ jobs:
           name: BlockLauncher-Re-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      # An Actions artifact needs a login, expires, and arrives wrapped in a zip.
+      # The summary is what a person can act on straight after a build: which
+      # commit, how big, and the hash to compare against.
+      - name: Summarise
+        run: |
+          set -e
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          size=$(stat -c %s "$apk")
+          sha=$(sha256sum "$apk" | cut -d' ' -f1)
+          {
+            echo "### BlockLauncher-Re debug APK"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | ${GITHUB_SHA} |"
+            echo "| size | ${size} bytes |"
+            echo "| sha256 | ${sha} |"
+            echo "| ABIs | arm64-v8a, armeabi-v7a |"
+            echo ""
+            echo "Attached to this run as BlockLauncher-Re-debug."
+            echo "A tag also publishes it as a release asset, without the zip wrapper."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish (release apk)
+    runs-on: ubuntu-latest
+    needs: android
+    # Only a tag publishes. A release is a claim that this exact commit was
+    # built; re-publishing "latest" on every push makes the claim meaningless.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: BlockLauncher-Re-debug
+          path: out
+
+      - name: Name the asset after the tag
+        run: |
+          set -e
+          version="${GITHUB_REF#refs/tags/v}"
+          test -n "$version"
+          mv out/app-debug.apk "out/BlockLauncher-Re-${version}-debug.apk"
+          cd out && sha256sum ./*.apk > SHA256SUMS
+          ls -l
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # This job never checks out, so `gh` has no git remote to infer the
+          # repository from and dies with "not a git repository" before it
+          # reaches the API. Naming the repository is cheaper than a checkout.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          tag="${GITHUB_REF#refs/tags/}"
+          cat > notes.md <<'NOTES'
+          A debug build, signed with the Android debug key. Installing it needs
+          "install unknown apps" enabled; this is not a Play-ready release.
+
+          What it does today: import a game APK you already have, list it with
+          its package, version, ABIs and SHA-256, and delete it again. It does
+          not start the game yet.
+          NOTES
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" out/* --clobber
+          else
+            gh release create "$tag" out/* \
+              --title "BlockLauncher-Re $tag" \
+              --notes-file notes.md
+          fi
+
+          gh release view "$tag" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
