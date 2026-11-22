@@ -198,11 +198,7 @@ M2.5 有一个属于它自己的、必须说清楚的缺口：运行时是完整
 
 ## 许可
 
-Apache License 2.0，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
-
-Apache-2.0 从加入 `NOTICE` 的那次提交起生效；此前是 MIT，而许可无法追溯撤销已经
-发出的副本。选 Apache-2.0 而不是 MIT 是有意的：它要求再分发者保留 `NOTICE` 里的
-署名、并标注自己改过哪些文件，这两条 MIT 都没有。
+MIT，见 [LICENSE](LICENSE)。
 
 许可只覆盖本项目的代码。Minecraft 属于 Mojang，本仓库不含它的任何部分，项目与
 Mojang / Microsoft 无关联。
