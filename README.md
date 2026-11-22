@@ -25,23 +25,6 @@ Two caveats that come with a debug build:
   build over it fails with "app not installed". Uninstall it once; builds after
   that share one key and update in place.
 
-### If the page does not open
-
-This repository is public, so a 404 is almost always somewhere between the
-browser and GitHub rather than in the repository. In this order:
-
-* `github.com/torvalds/linux` — if that also 404s or times out, GitHub is not
-  reachable from that network and no change here can help. A different
-  connection can.
-* The URL. The project was renamed: `wahfffff/blocklauncher-modern` is a
-  redirect page now, and `wahfffff9178/…` is a different account.
-* `nslookup github.com`. An answer outside GitHub's ranges (`20.205.*`,
-  `140.82.*`) means DNS poisoning; `223.5.5.5` or a VPN fixes it.
-
-The APK can also just be sent as a file — it sits on the
-[latest release](https://github.com/wahfffff/BlockLauncher-Re/releases/latest),
-which needs no account to download.
-
 ## Status
 
 This is being built in milestones, and the table below is the truth about it
