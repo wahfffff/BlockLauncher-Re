@@ -12,15 +12,15 @@
 //! * the game library arrives later through `System.loadLibrary`, which on
 //!   Android is `android_dlopen_ext` — not `dlopen`.
 //!
-//! Only `android_dlopen_ext` is interposed. An earlier version also exported
-//! `dlopen`; that took the whole process down before the game started, because
-//! the linker calls `dlopen` while it is still initialising itself and
-//! `dlsym(RTLD_NEXT, "dlopen")` is not safe at that point. Interposing the one
-//! function ART actually calls is both sufficient and a far smaller surface.
+//! Only `android_dlopen_ext` is interposed, and the real function is taken from
+//! `libdl`'s own handle rather than through `RTLD_NEXT`. Both of those are
+//! recorded because both were paid for on a device:
 //!
-//! Every symbol a loaded library exports is a hazard, so this one forwards
-//! without allocating, guards against re-entry, and resolves the real function
-//! once.
+//! * exporting `dlopen` took the process down before the game started — the
+//!   linker calls it while it is still initialising itself;
+//! * `dlsym(RTLD_NEXT, "android_dlopen_ext")` resolved back to this very
+//!   function, and the forward became unbounded recursion:
+//!   `Fatal signal 11 ... Cause: stack pointer is close to top of stack`.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -28,8 +28,9 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 const ANDROID_LOG_INFO: c_int = 4;
 const ANDROID_LOG_WARN: c_int = 5;
 
-/// `(void *) -1`: "the next definition after this one".
-const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
+/// `dlopen` flags: resolve now, and never load anything new.
+const RTLD_NOW: c_int = 2;
+const RTLD_NOLOAD: c_int = 4;
 
 type DlopenExtFn = unsafe extern "C" fn(*const c_char, c_int, *const c_void) -> *mut c_void;
 
@@ -40,6 +41,7 @@ extern "C" {
 
 extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void;
 }
 
 /// The loader may be handed a bare soname, an absolute path in the APK's lib
@@ -47,8 +49,7 @@ extern "C" {
 const TARGET: &str = "libminecraftpe.so";
 
 /// Resolved once. Null means "not found yet" and is retried rather than cached
-/// as a failure, because `dlsym` can legitimately fail very early in process
-/// startup.
+/// as a failure, because `dlsym` can legitimately fail very early in startup.
 static REAL: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Re-entry guard: if the real `android_dlopen_ext` loads something that ends up
@@ -77,13 +78,28 @@ fn enabled() -> bool {
     std::env::var_os("BLRE_PRELOAD").is_some_and(|v| v == "1")
 }
 
+/// The real `android_dlopen_ext`, taken from `libdl`'s own handle.
+///
+/// Naming the library removes the ambiguity that `RTLD_NEXT` had, and the
+/// explicit self-check means a wrong resolution is refused instead of recursing.
 fn real_dlopen_ext() -> Option<DlopenExtFn> {
     let cached = REAL.load(Ordering::Acquire);
     if !cached.is_null() {
         return Some(unsafe { std::mem::transmute::<*mut c_void, DlopenExtFn>(cached) });
     }
-    let addr = unsafe { dlsym(RTLD_NEXT, c"android_dlopen_ext".as_ptr()) };
-    if addr.is_null() {
+
+    let self_addr = android_dlopen_ext as *const () as usize;
+    let libdl = unsafe { dlopen(c"libdl.so".as_ptr(), RTLD_NOW | RTLD_NOLOAD) };
+    if libdl.is_null() {
+        log_at(ANDROID_LOG_WARN, "libdl.so not found; refusing to forward");
+        return None;
+    }
+    let addr = unsafe { dlsym(libdl, c"android_dlopen_ext".as_ptr()) };
+    if addr.is_null() || addr as usize == self_addr {
+        log_at(
+            ANDROID_LOG_WARN,
+            "android_dlopen_ext did not resolve to the loader's own; refusing to forward",
+        );
         return None;
     }
     REAL.store(addr, Ordering::Release);
@@ -179,9 +195,9 @@ pub unsafe extern "C" fn android_dlopen_ext(
     flags: c_int,
     extinfo: *const c_void,
 ) -> *mut c_void {
-    // If the real function cannot be resolved yet the load is refused rather
-    // than mis-routed: returning null makes the caller fail loudly, which is the
-    // only honest option when forwarding is impossible.
+    // If the real function cannot be resolved the load is refused rather than
+    // mis-routed: returning null makes the caller fail loudly, which is the only
+    // honest option when forwarding is impossible.
     let Some(real) = real_dlopen_ext() else {
         return std::ptr::null_mut();
     };
