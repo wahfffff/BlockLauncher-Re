@@ -20,6 +20,7 @@ pub mod catalog;
 pub mod elf;
 pub mod error;
 pub mod hook;
+pub mod inject;
 pub mod jni_glue;
 pub mod launch;
 pub mod legacy;
