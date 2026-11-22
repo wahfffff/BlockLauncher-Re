@@ -56,11 +56,12 @@ rather than the roadmap restated as if it were done.
 | nmod packages (zip + manifest, overrides, per-ABI libraries) | **done off-device** | `cargo test`; nothing is extracted or loaded yet |
 | Legacy `.mod` patches (PTP container: author line, payload size) | **read only** | `cargo test` against 8 real files; the payload is not applied — see `docs/LEGACY-MOD.md` |
 | Launch planning (ABI choice, mod filtering, ordering) | **done** | `cargo test` |
+| Hook-point resolution (ELF dynamic symbols vs. real game builds) | **done off-device** | `cargo test`, plus a real 0.14.3 `libminecraftpe.so` (30,992 symbols) — see `docs/HOOKS.md` |
 | JNI bridge | **done** | `cargo test` for the bridge; the symbol name is checked by the APK build |
 | Android UI (Compose Material 3) | **three lists** | CI builds and inspects the APK; nobody has looked at it on a phone yet |
 | Actual game launch / injection | not started | — |
 
-`cargo test` runs 126 cases on a host machine. The format readers are tested
+`cargo test` runs 133 cases on a host machine. The format readers are tested
 against archives this repository *builds byte by byte* in the test file, so the
 tests cannot pass by repeating the reader's own mistake.
 
@@ -110,11 +111,13 @@ core/                     Rust, no Android dependency
   src/script.rs           the ModPE contract: Host trait, API table, Limits
   src/script_engine.rs    those globals bound to a JavaScript engine (Boa)
   src/nmod.rs             nmod packages: manifest, overrides, per-ABI libs
+  src/elf.rs              ELF dynamic symbols: is a hook point exported, where
+  src/hook.rs             which game function each ModPE call needs
   src/launch.rs           pure planning: build + device + mods -> plan
   src/bridge.rs           one JSON request in, one JSON reply out
   src/jni_glue.rs         the single JNI export; empty off-device
   examples/inspect.rs     `cargo run --example inspect -- file.apk`
-  tests/core.rs           24 host-side cases (+102 in src/)
+  tests/core.rs           24 host-side cases (+109 in src/)
 android/                  Kotlin + Compose Material 3
   app/src/main/.../NativeBridge.kt   loadLibrary + the one external function
   app/src/main/.../Core.kt           typed wrapper, every call off the main thread

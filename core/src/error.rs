@@ -26,6 +26,8 @@ pub enum Error {
     BadPack(String),
     /// A ModPE script failed before it could define anything.
     BadScript(String),
+    /// A shared object is not an ELF file this reader can trust.
+    BadElf(String),
     /// Reading or writing a file on the device failed.
     Io(String),
     /// The persisted index could not be read back.
@@ -44,6 +46,7 @@ impl fmt::Display for Error {
             Error::BadMod(s) => write!(f, "bad native mod: {s}"),
             Error::BadPack(s) => write!(f, "bad texture pack: {s}"),
             Error::BadScript(s) => write!(f, "script error: {s}"),
+            Error::BadElf(s) => write!(f, "unreadable shared object: {s}"),
             Error::Io(s) => write!(f, "io error: {s}"),
             Error::Corrupt(s) => write!(f, "corrupt index: {s}"),
         }

@@ -52,6 +52,7 @@ impl Failure {
             Error::BadMod(_) => "BAD_MOD",
             Error::BadPack(_) => "BAD_PACK",
             Error::BadScript(_) => "BAD_SCRIPT",
+            Error::BadElf(_) => "BAD_ELF",
             Error::Io(_) => "IO",
             Error::Corrupt(_) => "CORRUPT_INDEX",
         };
@@ -189,6 +190,36 @@ fn handle(request: &str) -> std::result::Result<Value, Failure> {
                 .map(|(name, arity)| json!({ "name": name, "arity": arity }))
                 .collect();
             Ok(json!({ "globals": globals, "hooks": crate::script::HOOKS }))
+        }
+
+        // Whether injection can work is decided from the APK, before the game is
+        // started. Answering it here means a build whose symbols do not match is
+        // refused with a sentence, instead of a launch that dies inside `dlopen`.
+        "hooks.plan" => {
+            let path = string_arg(&req, "path")?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| Failure::new("IO", format!("cannot read {path}: {e}")))?;
+            let archive = crate::apk::Apk::open(&bytes).map_err(Failure::from_core)?;
+            let abis = crate::apk::abis(&archive);
+            let abi = match req.get("abi").and_then(Value::as_str) {
+                Some(want) => want.to_string(),
+                None => abis.first().cloned().ok_or_else(|| {
+                    Failure::new("BAD_REQUEST", "this APK ships no native code")
+                })?,
+            };
+            let name = format!("lib/{abi}/libminecraftpe.so");
+            let entry = archive.entry(&name).ok_or_else(|| {
+                Failure::new("MISSING_ENTRY", format!("archive has no {name}"))
+            })?;
+            let so = archive.read(entry).map_err(Failure::from_core)?;
+            let plan = crate::hook::plan(&so).map_err(Failure::from_core)?;
+            Ok(json!({
+                "abi": abi,
+                "abis": abis,
+                "usable": plan.usable(),
+                "summary": plan.summary(),
+                "plan": plan,
+            }))
         }
 
         // Listing is not loading. A legacy `.mod` is reported as readable but

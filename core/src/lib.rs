@@ -17,7 +17,9 @@ pub mod apk;
 pub mod axml;
 pub mod bridge;
 pub mod catalog;
+pub mod elf;
 pub mod error;
+pub mod hook;
 pub mod jni_glue;
 pub mod launch;
 pub mod legacy;
@@ -33,6 +35,7 @@ mod tests_support;
 
 pub use catalog::{Catalog, ImportOutcome, Library, VersionEntry};
 pub use error::{Error, Result};
+pub use hook::Plan as HookPlan;
 pub use launch::{LaunchPlan, ModSlot, RejectedMod, Rejection};
 pub use legacy::LegacyMod;
 pub use mods::{Entry as ModEntry, Kind as ModKind};
