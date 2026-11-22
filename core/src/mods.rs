@@ -92,9 +92,18 @@ fn extension(name: &str) -> Option<String> {
 pub fn scan(dir: &Path) -> Result<Vec<Entry>> {
     let mut out: Vec<Entry> = Vec::new();
 
-    let read = std::fs::read_dir(dir).map_err(|e| {
-        Error::BadMod(format!("cannot read {}: {e}", dir.display()))
-    })?;
+    // A directory that does not exist means nothing has been imported yet, which
+    // is the state of every fresh install: reporting that as a failure turned
+    // the whole screen into "the core is not responding" on first launch. Any
+    // other error (permission denied on a directory that does exist) is a real
+    // condition and still surfaces.
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(Error::BadMod(format!("cannot read {}: {e}", dir.display())));
+        }
+    };
 
     let mut paths: Vec<PathBuf> = Vec::new();
     for item in read {
@@ -291,6 +300,27 @@ mod tests {
         assert!(scan(&d).unwrap().is_empty());
     }
 
+    /// The state of every fresh install: the app hands the core a folder it has
+    /// not created yet, because nothing has been imported. This used to be a
+    /// `BAD_MOD` failure that blanked every tab behind "core not responding".
+    #[test]
+    fn a_directory_that_does_not_exist_is_empty_not_an_error() {
+        let d = tmp("missing").join("mods");
+        assert!(!d.exists());
+        let list = scan(&d).expect("a missing folder is an empty list");
+        assert!(list.is_empty());
+    }
+
+    /// The same path *with* something in it still works, so the early return
+    /// above cannot swallow a readable directory.
+    #[test]
+    fn a_missing_parent_does_not_hide_a_real_folder() {
+        let base = tmp("real");
+        std::fs::create_dir_all(base.join("mods")).unwrap();
+        write_mod(&base.join("mods"), "夜视.mod");
+        assert_eq!(scan(&base.join("mods")).unwrap().len(), 1);
+    }
+
     #[test]
     fn a_legacy_patch_is_listed_as_usable_false() {
         let d = tmp("legacy");
@@ -382,13 +412,6 @@ mod tests {
         write_mod(&d, "c.mod");
         let names: Vec<_> = scan(&d).unwrap().into_iter().map(|e| e.file_name).collect();
         assert_eq!(names, vec!["a.mod", "b.mod", "c.mod"]);
-    }
-
-    #[test]
-    fn a_missing_directory_is_an_error_not_an_empty_list() {
-        let d = tmp("missing");
-        std::fs::remove_dir_all(&d).unwrap();
-        assert!(scan(&d).is_err());
     }
 
     #[test]

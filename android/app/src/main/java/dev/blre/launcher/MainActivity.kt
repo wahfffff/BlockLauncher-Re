@@ -126,17 +126,51 @@ private fun LauncherApp() {
     fun refresh() {
         scope.launch {
             loading = true
-            try {
-                coreVersion = Core.version()
-                builds = Core.list(root)
-                packs = Core.packs(root)
-                mods = Core.scanMods(modsRoot)
-                api = Core.scriptApi()
-                fatal = null
+            // `Core.version()` is the one call that proves the core is alive at
+            // all. If it fails the bridge itself is missing, and nothing else the
+            // core says would be worth showing — that is the only case where the
+            // whole screen is replaced. Every other call is one section's problem:
+            // a mod folder the app has not created yet must not blank the version
+            // list sitting next to it.
+            val version = try {
+                Core.version()
             } catch (t: Throwable) {
                 fatal = t.message ?: t.toString()
-            } finally {
                 loading = false
+                return@launch
+            }
+            fatal = null
+            coreVersion = version
+
+            val problems = mutableListOf<String>()
+
+            builds = try {
+                Core.list(root)
+            } catch (t: Throwable) {
+                problems += "版本库：${t.message ?: t}"
+                builds
+            }
+            packs = try {
+                Core.packs(root)
+            } catch (t: Throwable) {
+                problems += "材质包：${t.message ?: t}"
+                packs
+            }
+            mods = try {
+                Core.scanMods(modsRoot)
+            } catch (t: Throwable) {
+                problems += "Mods：${t.message ?: t}"
+                mods
+            }
+            api = try {
+                Core.scriptApi()
+            } catch (t: Throwable) {
+                api
+            }
+
+            loading = false
+            if (problems.isNotEmpty()) {
+                snackbar.showSnackbar(problems.joinToString("；"))
             }
         }
     }
@@ -229,7 +263,15 @@ private fun LauncherApp() {
                     pickTarget = tab
                     picker.launch(arrayOf("*/*"))
                 },
-                icon = {},
+                // An ExtendedFAB reserves an icon slot; leaving it empty made the
+                // button look like a text label that had lost half of itself.
+                // The glyph is suppressed while the picker is running so it does
+                // not read as "add another" mid-import.
+                icon = {
+                    if (!busy) {
+                        Text("+", style = MaterialTheme.typography.titleLarge)
+                    }
+                },
                 text = {
                     Text(
                         when {
