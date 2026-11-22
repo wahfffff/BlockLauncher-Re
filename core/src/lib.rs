@@ -25,6 +25,10 @@ pub mod launch;
 pub mod legacy;
 pub mod mods;
 pub mod nmod;
+/// The in-process half: only meaningful on Android, where it is mapped into the
+/// game by the linker.
+#[cfg(target_os = "android")]
+pub mod preload;
 pub mod pack;
 pub mod script;
 pub mod script_engine;
