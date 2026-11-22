@@ -231,4 +231,13 @@ against. Every such call reports that instead of pretending.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Apache-2.0 applies from the commit that added `NOTICE`; everything before it
+was MIT, and a licence cannot be withdrawn retroactively for copies already
+made. Apache-2.0 rather than MIT on purpose: it obliges a redistributor to keep
+the attribution in `NOTICE` and to mark files they changed, which MIT does not.
+
+The licence covers this project's code and nothing else. Minecraft is Mojang's;
+no part of it is shipped here, and this project is not affiliated with Mojang or
+Microsoft.
