@@ -32,6 +32,7 @@ pub mod preload;
 pub mod pack;
 pub mod script;
 pub mod script_engine;
+pub mod thumb;
 pub mod version;
 
 #[cfg(test)]

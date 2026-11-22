@@ -3,32 +3,35 @@
 //! Android offers no supported way into another app's process, so the only
 //! entry point is the dynamic linker itself: `wrap.<package>` set to
 //! `LD_PRELOAD=<library>` makes the linker map this library first, in the
-//! target's own process, under the target's own uid and SELinux domain. That is
-//! the whole mechanism; everything below is what to do with it.
+//! target's own process, under the target's own uid and SELinux domain.
 //!
 //! Two facts about *when* this runs decide the shape of this module:
 //!
-//! * `.init_array` runs before the game exists. At that moment
-//!   `libminecraftpe.so` is not mapped, so there is nothing to resolve yet.
-//! * the game library is brought in later by `System.loadLibrary`, which on
-//!   Android is `android_dlopen_ext`, not `dlopen`. Interposing only `dlopen`
-//!   would therefore never fire.
+//! * `.init_array` runs before the game exists, so `libminecraftpe.so` is not
+//!   mapped yet and there is nothing to resolve;
+//! * the game library arrives later through `System.loadLibrary`, which on
+//!   Android is `android_dlopen_ext` — not `dlopen`.
 //!
-//! So this module installs interposers for both and does its work at the moment
-//! the game library is actually loaded — inside the game's own `dlopen` call,
-//! where the handle is in hand and every export is available.
+//! Only `android_dlopen_ext` is interposed. An earlier version also exported
+//! `dlopen`; that took the whole process down before the game started, because
+//! the linker calls `dlopen` while it is still initialising itself and
+//! `dlsym(RTLD_NEXT, "dlopen")` is not safe at that point. Interposing the one
+//! function ART actually calls is both sufficient and a far smaller surface.
 //!
-//! The interposers forward unconditionally and cheaply; the expensive work only
-//! happens when `BLRE_PRELOAD=1` is in the environment, so loading this library
-//! as the app's own JNI code costs one `getenv`.
+//! Every symbol a loaded library exports is a hazard, so this one forwards
+//! without allocating, guards against re-entry, and resolves the real function
+//! once.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 const ANDROID_LOG_INFO: c_int = 4;
 const ANDROID_LOG_WARN: c_int = 5;
 
+/// `(void *) -1`: "the next definition after this one".
 const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
+
+type DlopenExtFn = unsafe extern "C" fn(*const c_char, c_int, *const c_void) -> *mut c_void;
 
 #[link(name = "log")]
 extern "C" {
@@ -39,16 +42,21 @@ extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
-type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
-type DlopenExtFn = unsafe extern "C" fn(*const c_char, c_int, *const c_void) -> *mut c_void;
-
-/// The library the hooks live in. Matched as a substring because the loader may
-/// be given an absolute path, a bare soname, or a path inside the APK's lib dir.
+/// The loader may be handed a bare soname, an absolute path in the APK's lib
+/// directory, or a path inside another namespace. All of them end in this.
 const TARGET: &str = "libminecraftpe.so";
 
-/// Set once the target has been handled, so a second load (a second game
-/// instance in the same process is impossible, but a retry is not) cannot
-/// install the same hooks twice.
+/// Resolved once. Null means "not found yet" and is retried rather than cached
+/// as a failure, because `dlsym` can legitimately fail very early in process
+/// startup.
+static REAL: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Re-entry guard: if the real `android_dlopen_ext` loads something that ends up
+/// calling back into us, the inner call must pass straight through.
+static IN_CALL: AtomicBool = AtomicBool::new(false);
+
+/// Set once the target has been handled, so a second load cannot install the
+/// same hooks twice.
 static DONE: AtomicBool = AtomicBool::new(false);
 
 fn log_at(prio: c_int, msg: &str) {
@@ -63,16 +71,31 @@ fn log(msg: &str) {
     log_at(ANDROID_LOG_INFO, msg);
 }
 
+/// The work is opt-in: loading this library as the app's own JNI code must cost
+/// nothing more than one `getenv`.
 fn enabled() -> bool {
     std::env::var_os("BLRE_PRELOAD").is_some_and(|v| v == "1")
+}
+
+fn real_dlopen_ext() -> Option<DlopenExtFn> {
+    let cached = REAL.load(Ordering::Acquire);
+    if !cached.is_null() {
+        return Some(unsafe { std::mem::transmute::<*mut c_void, DlopenExtFn>(cached) });
+    }
+    let addr = unsafe { dlsym(RTLD_NEXT, c"android_dlopen_ext".as_ptr()) };
+    if addr.is_null() {
+        return None;
+    }
+    REAL.store(addr, Ordering::Release);
+    Some(unsafe { std::mem::transmute::<*mut c_void, DlopenExtFn>(addr) })
 }
 
 // ------------------------------------------------------------------ the work
 
 /// What happens once the game library is mapped.
 ///
-/// The handle comes straight from the `dlopen` that just returned, which is the
-/// most reliable handle available: it is exactly the mapping the game will use.
+/// The handle comes from the load that just returned, which is the most
+/// reliable handle available: it is exactly the mapping the game will use.
 fn on_game_loaded(handle: *mut c_void, name: &str) {
     log(&format!("game library loaded: {name}"));
 
@@ -94,10 +117,7 @@ fn on_game_loaded(handle: *mut c_void, name: &str) {
         match hit {
             Some((symbol, addr)) => {
                 found += 1;
-                log(&format!(
-                    "  {} -> {symbol} @ {addr:p}",
-                    point.id
-                ));
+                log(&format!("  {} -> {symbol} @ {addr:p}", point.id));
             }
             None => {
                 missing.push(point.id);
@@ -120,18 +140,20 @@ fn on_game_loaded(handle: *mut c_void, name: &str) {
     ));
 }
 
-/// Run the post-load work, but never unwind into the loader.
+/// Run the post-load work, but never unwind into the loader: a panic here would
+/// cross a C frame, which is undefined behaviour rather than a diagnosable crash.
 fn inspect(handle: *mut c_void, name: &str) {
     if handle.is_null() || DONE.swap(true, Ordering::SeqCst) {
         return;
     }
-    // A panic here would unwind through `dlopen`'s C frame, which is undefined
-    // behaviour rather than a crash someone can debug.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         on_game_loaded(handle, name);
     }));
     if result.is_err() {
-        log_at(ANDROID_LOG_WARN, "hook resolution panicked; the game is untouched");
+        log_at(
+            ANDROID_LOG_WARN,
+            "hook resolution panicked; the game itself is untouched",
+        );
     }
 }
 
@@ -147,38 +169,32 @@ fn interested(name: *const c_char) -> Option<String> {
     }
 }
 
-// ------------------------------------------------------------- interposers
+// ------------------------------------------------------------- the interposer
 
 /// ART loads the game's native library through `android_dlopen_ext`; this is the
-/// one that actually fires.
+/// one that actually fires for `System.loadLibrary`.
 #[no_mangle]
 pub unsafe extern "C" fn android_dlopen_ext(
     filename: *const c_char,
     flags: c_int,
     extinfo: *const c_void,
 ) -> *mut c_void {
-    let real: DlopenExtFn = unsafe {
-        std::mem::transmute(dlsym(RTLD_NEXT, c"android_dlopen_ext".as_ptr()))
+    // If the real function cannot be resolved yet the load is refused rather
+    // than mis-routed: returning null makes the caller fail loudly, which is the
+    // only honest option when forwarding is impossible.
+    let Some(real) = real_dlopen_ext() else {
+        return std::ptr::null_mut();
     };
-    let h = unsafe { real(filename, flags, extinfo) };
 
-    if enabled() {
+    // Forward first, always, and without touching the arguments: the loader's
+    // work must not depend on whether we care about this library.
+    let reentered = IN_CALL.swap(true, Ordering::SeqCst);
+    let h = unsafe { real(filename, flags, extinfo) };
+    IN_CALL.store(reentered, Ordering::SeqCst);
+
+    if !reentered && enabled() {
         if let Some(name) = interested(filename) {
             inspect(h, &name);
-        }
-    }
-    h
-}
-
-/// Kept for callers that use plain `dlopen`; harmless when unused.
-#[no_mangle]
-pub unsafe extern "C" fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void {
-    let real: DlopenFn = unsafe { std::mem::transmute(dlsym(RTLD_NEXT, c"dlopen".as_ptr())) };
-    let h = unsafe { real(name, flags) };
-
-    if enabled() {
-        if let Some(n) = interested(name) {
-            inspect(h, &n);
         }
     }
     h
