@@ -5,34 +5,33 @@
 //! `LD_PRELOAD=<library>` makes the linker map this library first, in the
 //! target's own process, under the target's own uid and SELinux domain.
 //!
-//! Two facts about *when* this runs decide the shape of this module:
+//! `.init_array` runs before the game exists, so the game library is not mapped
+//! yet; it arrives later through `System.loadLibrary`. The whole job here is to
+//! be in the right function at that moment.
 //!
-//! * `.init_array` runs before the game exists, so `libminecraftpe.so` is not
-//!   mapped yet and there is nothing to resolve;
-//! * the game library arrives later through `System.loadLibrary`, which on
-//!   Android is `android_dlopen_ext` — not `dlopen`.
+//! # Why it forwards to `__loader_*`
 //!
-//! Only `android_dlopen_ext` is interposed, and the real function is taken from
-//! `libdl`'s own handle rather than through `RTLD_NEXT`. Both of those are
-//! recorded because both were paid for on a device:
+//! bionic keeps the real implementations in symbols named differently from the
+//! ones it exports for callers: `dlopen` is `__loader_dlopen`,
+//! `android_dlopen_ext` is `__loader_android_dlopen_ext`. Forwarding to those
+//! directly is the only approach here that cannot recurse, and two earlier
+//! attempts proved why the obvious ones do not work:
 //!
-//! * exporting `dlopen` took the process down before the game started — the
-//!   linker calls it while it is still initialising itself;
 //! * `dlsym(RTLD_NEXT, "android_dlopen_ext")` resolved back to this very
 //!   function, and the forward became unbounded recursion:
-//!   `Fatal signal 11 ... Cause: stack pointer is close to top of stack`.
+//!   `Fatal signal 11 ... Cause: stack pointer is close to top of stack`;
+//! * resolving through a `libdl` handle needed `dlopen` to obtain the handle,
+//!   which is the function being interposed.
+//!
+//! Each `__loader_*` entry takes one extra argument, the address of the caller,
+//! which bionic uses for namespace and `RTLD_NEXT` bookkeeping. Passing this
+//! library's own function address is the truthful answer.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const ANDROID_LOG_INFO: c_int = 4;
 const ANDROID_LOG_WARN: c_int = 5;
-
-/// `dlopen` flags: resolve now, and never load anything new.
-const RTLD_NOW: c_int = 2;
-const RTLD_NOLOAD: c_int = 4;
-
-type DlopenExtFn = unsafe extern "C" fn(*const c_char, c_int, *const c_void) -> *mut c_void;
 
 #[link(name = "log")]
 extern "C" {
@@ -41,24 +40,35 @@ extern "C" {
 
 extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void;
+
+    /// The linker's own `dlopen`, not the exported alias.
+    fn __loader_dlopen(name: *const c_char, flags: c_int, caller: *const c_void) -> *mut c_void;
+
+    /// The linker's own `android_dlopen_ext`.
+    fn __loader_android_dlopen_ext(
+        name: *const c_char,
+        flags: c_int,
+        info: *const c_void,
+        caller: *const c_void,
+    ) -> *mut c_void;
 }
 
 /// The loader may be handed a bare soname, an absolute path in the APK's lib
 /// directory, or a path inside another namespace. All of them end in this.
 const TARGET: &str = "libminecraftpe.so";
 
-/// Resolved once. Null means "not found yet" and is retried rather than cached
-/// as a failure, because `dlsym` can legitimately fail very early in startup.
-static REAL: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-
-/// Re-entry guard: if the real `android_dlopen_ext` loads something that ends up
-/// calling back into us, the inner call must pass straight through.
+/// Re-entry guard. If the loader ends up calling back into us while we are
+/// inside it, the nested call must pass straight through.
 static IN_CALL: AtomicBool = AtomicBool::new(false);
 
 /// Set once the target has been handled, so a second load cannot install the
 /// same hooks twice.
 static DONE: AtomicBool = AtomicBool::new(false);
+
+/// How many load requests have been logged. The diagnostic is bounded so a game
+/// that loads a hundred libraries does not flood logcat.
+static LOGGED: AtomicUsize = AtomicUsize::new(0);
+const LOG_LIMIT: usize = 60;
 
 fn log_at(prio: c_int, msg: &str) {
     if let Ok(text) = CString::new(msg) {
@@ -78,40 +88,12 @@ fn enabled() -> bool {
     std::env::var_os("BLRE_PRELOAD").is_some_and(|v| v == "1")
 }
 
-/// The real `android_dlopen_ext`, taken from `libdl`'s own handle.
-///
-/// Naming the library removes the ambiguity that `RTLD_NEXT` had, and the
-/// explicit self-check means a wrong resolution is refused instead of recursing.
-fn real_dlopen_ext() -> Option<DlopenExtFn> {
-    let cached = REAL.load(Ordering::Acquire);
-    if !cached.is_null() {
-        return Some(unsafe { std::mem::transmute::<*mut c_void, DlopenExtFn>(cached) });
-    }
-
-    let self_addr = android_dlopen_ext as *const () as usize;
-    let libdl = unsafe { dlopen(c"libdl.so".as_ptr(), RTLD_NOW | RTLD_NOLOAD) };
-    if libdl.is_null() {
-        log_at(ANDROID_LOG_WARN, "libdl.so not found; refusing to forward");
-        return None;
-    }
-    let addr = unsafe { dlsym(libdl, c"android_dlopen_ext".as_ptr()) };
-    if addr.is_null() || addr as usize == self_addr {
-        log_at(
-            ANDROID_LOG_WARN,
-            "android_dlopen_ext did not resolve to the loader's own; refusing to forward",
-        );
-        return None;
-    }
-    REAL.store(addr, Ordering::Release);
-    Some(unsafe { std::mem::transmute::<*mut c_void, DlopenExtFn>(addr) })
-}
-
 // ------------------------------------------------------------------ the work
 
 /// What happens once the game library is mapped.
 ///
-/// The handle comes from the load that just returned, which is the most
-/// reliable handle available: it is exactly the mapping the game will use.
+/// The handle comes from the load that just returned, which is the most reliable
+/// handle available: it is exactly the mapping the game will use.
 fn on_game_loaded(handle: *mut c_void, name: &str) {
     log(&format!("game library loaded: {name}"));
 
@@ -173,44 +155,73 @@ fn inspect(handle: *mut c_void, name: &str) {
     }
 }
 
-fn interested(name: *const c_char) -> Option<String> {
+fn name_of(name: *const c_char) -> Option<String> {
     if name.is_null() {
         return None;
     }
-    let s = unsafe { CStr::from_ptr(name) }.to_str().ok()?;
-    if s.contains(TARGET) {
-        Some(s.to_owned())
-    } else {
-        None
-    }
+    unsafe { CStr::from_ptr(name) }.to_str().ok().map(str::to_owned)
 }
 
-// ------------------------------------------------------------- the interposer
+/// Every load the game performs is worth one line while this is being brought
+/// up: it is how we learned which entry point the game actually uses.
+fn note_load(kind: &str, name: *const c_char, ok: bool) {
+    if !enabled() {
+        return;
+    }
+    let n = LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n >= LOG_LIMIT {
+        return;
+    }
+    let what = name_of(name).unwrap_or_else(|| "<null>".to_string());
+    log(&format!(
+        "{kind}({what}) -> {}",
+        if ok { "ok" } else { "failed" }
+    ));
+}
 
-/// ART loads the game's native library through `android_dlopen_ext`; this is the
-/// one that actually fires for `System.loadLibrary`.
+// ----------------------------------------------------------- the interposers
+
+/// ART loads the game's native library through `android_dlopen_ext`.
 #[no_mangle]
 pub unsafe extern "C" fn android_dlopen_ext(
     filename: *const c_char,
     flags: c_int,
     extinfo: *const c_void,
 ) -> *mut c_void {
-    // If the real function cannot be resolved the load is refused rather than
-    // mis-routed: returning null makes the caller fail loudly, which is the only
-    // honest option when forwarding is impossible.
-    let Some(real) = real_dlopen_ext() else {
-        return std::ptr::null_mut();
-    };
+    let caller = android_dlopen_ext as *const () as *const c_void;
 
-    // Forward first, always, and without touching the arguments: the loader's
-    // work must not depend on whether we care about this library.
     let reentered = IN_CALL.swap(true, Ordering::SeqCst);
-    let h = unsafe { real(filename, flags, extinfo) };
+    let h = unsafe { __loader_android_dlopen_ext(filename, flags, extinfo, caller) };
     IN_CALL.store(reentered, Ordering::SeqCst);
 
-    if !reentered && enabled() {
-        if let Some(name) = interested(filename) {
-            inspect(h, &name);
+    note_load("android_dlopen_ext", filename, !h.is_null());
+    if !reentered && !h.is_null() {
+        if let Some(n) = name_of(filename) {
+            if n.contains(TARGET) {
+                inspect(h, &n);
+            }
+        }
+    }
+    h
+}
+
+/// Some libraries are opened with plain `dlopen`, and the forward target here is
+/// the loader's own symbol, so this cannot recurse — which is what made the
+/// first attempt at interposing `dlopen` crash the process.
+#[no_mangle]
+pub unsafe extern "C" fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void {
+    let caller = dlopen as *const () as *const c_void;
+
+    let reentered = IN_CALL.swap(true, Ordering::SeqCst);
+    let h = unsafe { __loader_dlopen(name, flags, caller) };
+    IN_CALL.store(reentered, Ordering::SeqCst);
+
+    note_load("dlopen", name, !h.is_null());
+    if !reentered && !h.is_null() {
+        if let Some(n) = name_of(name) {
+            if n.contains(TARGET) {
+                inspect(h, &n);
+            }
         }
     }
     h
